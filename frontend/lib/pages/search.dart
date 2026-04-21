@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'activity.dart';
+import 'activity_detail.dart';
 import 'home.dart';
 import 'profile.dart';
 
@@ -22,60 +24,88 @@ class _SearchPageState extends State<SearchPage> {
   final TextEditingController _searchController = TextEditingController();
   final MapController _mapController = MapController();
 
-  final List<Map<String, dynamic>> _activities = [
-    {
-      'title': 'Afforestation',
-      'category': 'Nature',
-      'location': 'Bejaia Forest',
-      'distance': '1.2 km',
-      'point': LatLng(36.7525, 5.0843),
-    },
-    {
-      'title': 'Beach Cleaning',
-      'category': 'Cleaning',
-      'location': 'Tichy Beach',
-      'distance': '3.8 km',
-      'point': LatLng(36.6718, 5.1517),
-    },
-    {
-      'title': 'Recycling Drop',
-      'category': 'Recycling',
-      'location': 'Ihaddaden',
-      'distance': '2.1 km',
-      'point': LatLng(36.7443, 5.0631),
-    },
-    {
-      'title': 'Water Protection',
-      'category': 'Water',
-      'location': 'Soummam River',
-      'distance': '4.5 km',
-      'point': LatLng(36.7205, 4.9998),
-    },
-  ];
+  // Loaded from Supabase
+  List<Map<String, dynamic>> _allActivities = [];
+  List<String> _typeFilters = ['All'];
+  bool _loadingActivities = false;
+  bool _loadingFilters = false;
 
   int _currentIndex = 2;
   String _selectedFilter = 'All';
   bool _showNearbySheet = true;
 
-  String get _query => _searchController.text.trim().toLowerCase();
+  @override
+  void initState() {
+    super.initState();
+    _loadFilters();
+    _loadActivities();
+  }
 
-  List<String> get _filters => [
-    'All',
-    'Nature',
-    'Cleaning',
-    'Recycling',
-    'Water',
-  ];
+  Future<void> _loadFilters() async {
+    setState(() => _loadingFilters = true);
+    try {
+      final data = await Supabase.instance.client
+          .from('type_activite')
+          .select('nom')
+          .order('id_type_act');
+      if (mounted) {
+        setState(() {
+          _typeFilters = [
+            'All',
+            ...(data as List).map((r) => r['nom'] as String? ?? ''),
+          ];
+        });
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _loadingFilters = false);
+    }
+  }
+
+  Future<void> _loadActivities() async {
+    setState(() => _loadingActivities = true);
+    try {
+      var query = Supabase.instance.client
+          .from('activite')
+          .select('id_act, titre, localisation, latitude, longitude, type_activite(nom)')
+          .eq('status', 'approved');
+
+      final q = _searchController.text.trim();
+      if (q.isNotEmpty) {
+        query = query.or('titre.ilike.%$q%,localisation.ilike.%$q%');
+      }
+
+      final data = await query.order('datecreation', ascending: false);
+
+      if (mounted) {
+        setState(() {
+          _allActivities = (data as List).map((row) {
+            final typeData = row['type_activite'] as Map<String, dynamic>?;
+            final lat = (row['latitude'] as num?)?.toDouble();
+            final lng = (row['longitude'] as num?)?.toDouble();
+            return {
+              'id': row['id_act'] as int? ?? 0,
+              'title': row['titre'] as String? ?? '',
+              'category': typeData?['nom'] as String? ?? '',
+              'location': row['localisation'] as String? ?? '',
+              'point': (lat != null && lng != null)
+                  ? LatLng(lat, lng)
+                  : null,
+            };
+          }).toList();
+        });
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _loadingActivities = false);
+    }
+  }
 
   List<Map<String, dynamic>> get _filteredActivities {
-    return _activities.where((activity) {
-      final matchesQuery =
-          _query.isEmpty ||
-          activity['title'].toString().toLowerCase().contains(_query) ||
-          activity['location'].toString().toLowerCase().contains(_query);
-      final matchesFilter =
-          _selectedFilter == 'All' || activity['category'] == _selectedFilter;
-      return matchesQuery && matchesFilter;
+    return _allActivities.where((activity) {
+      final matchesFilter = _selectedFilter == 'All' ||
+          activity['category'] == _selectedFilter;
+      return matchesFilter;
     }).toList();
   }
 
@@ -84,6 +114,8 @@ class _SearchPageState extends State<SearchPage> {
     _searchController.dispose();
     super.dispose();
   }
+
+  // ── Build ─────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -104,11 +136,14 @@ class _SearchPageState extends State<SearchPage> {
             ),
             children: [
               TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                urlTemplate:
+                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.example.ecodz',
               ),
               MarkerLayer(
-                markers: filteredActivities.map((activity) {
+                markers: filteredActivities
+                    .where((a) => a['point'] != null)
+                    .map((activity) {
                   return Marker(
                     point: activity['point'] as LatLng,
                     width: 88,
@@ -149,6 +184,8 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
+  // ── Search bar ────────────────────────────────────────────────
+
   Widget _buildTopSearchBar() {
     return Row(
       children: [
@@ -168,7 +205,8 @@ class _SearchPageState extends State<SearchPage> {
             ),
             child: TextField(
               controller: _searchController,
-              onChanged: (_) => setState(() {}),
+              onChanged: (_) => _loadActivities(),
+              onSubmitted: (_) => _loadActivities(),
               decoration: const InputDecoration(
                 icon: Icon(Icons.search_rounded),
                 hintText: 'Search activities near you',
@@ -179,7 +217,8 @@ class _SearchPageState extends State<SearchPage> {
         ),
         const SizedBox(width: 10),
         GestureDetector(
-          onTap: () => setState(() => _showNearbySheet = !_showNearbySheet),
+          onTap: () =>
+              setState(() => _showNearbySheet = !_showNearbySheet),
           child: Container(
             width: 56,
             height: 56,
@@ -226,6 +265,8 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
+  // ── Nearby sheet ─────────────────────────────────────────────
+
   Widget _buildNearbySheet(List<Map<String, dynamic>> activities) {
     return Container(
       padding: const EdgeInsets.all(14),
@@ -265,7 +306,21 @@ class _SearchPageState extends State<SearchPage> {
             ],
           ),
           const SizedBox(height: 12),
-          if (activities.isEmpty)
+          if (_loadingActivities)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Center(
+                child: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Color(0xFF2E7D32),
+                  ),
+                ),
+              ),
+            )
+          else if (activities.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 12),
               child: Text(
@@ -281,52 +336,61 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Widget _buildNearbyItem(Map<String, dynamic> activity) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF2F8F1),
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 46,
-            height: 46,
-            decoration: BoxDecoration(
-              color: _softGreen,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Icon(Icons.eco_rounded, color: _deepGreen),
+    return GestureDetector(
+      onTap: () {
+        final id = activity['id'] as int?;
+        if (id == null) return;
+        Navigator.push(
+          context,
+          PageRouteBuilder(
+            transitionDuration: const Duration(milliseconds: 350),
+            pageBuilder: (_, __, ___) =>
+                ActivityDetailPage(activityId: id),
+            transitionsBuilder: (_, animation, __, child) =>
+                FadeTransition(opacity: animation, child: child),
           ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  activity['title'] as String,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF173D1B),
+        );
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF2F8F1),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(
+                color: _softGreen,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(Icons.eco_rounded, color: _deepGreen),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    activity['title'] as String,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF173D1B),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  activity['location'] as String,
-                  style: const TextStyle(color: Color(0xFF507258)),
-                ),
-              ],
+                  const SizedBox(height: 3),
+                  Text(
+                    activity['location'] as String,
+                    style: const TextStyle(color: Color(0xFF507258)),
+                  ),
+                ],
+              ),
             ),
-          ),
-          Text(
-            activity['distance'] as String,
-            style: const TextStyle(
-              color: Color(0xFF1F6D2D),
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -383,35 +447,40 @@ class _SearchPageState extends State<SearchPage> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (context) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 30),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Filter activities',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            final filters = _loadingFilters ? ['All'] : _typeFilters;
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 30),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Filter activities',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 14),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: filters.map((filter) {
+                      final selected = filter == _selectedFilter;
+                      return ChoiceChip(
+                        label: Text(filter),
+                        selected: selected,
+                        onSelected: (_) {
+                          setState(() => _selectedFilter = filter);
+                          Navigator.pop(context);
+                        },
+                        selectedColor: _softGreen,
+                      );
+                    }).toList(),
+                  ),
+                ],
               ),
-              const SizedBox(height: 14),
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: _filters.map((filter) {
-                  final selected = filter == _selectedFilter;
-                  return ChoiceChip(
-                    label: Text(filter),
-                    selected: selected,
-                    onSelected: (_) {
-                      setState(() => _selectedFilter = filter);
-                      Navigator.pop(context);
-                    },
-                    selectedColor: _softGreen,
-                  );
-                }).toList(),
-              ),
-            ],
-          ),
+            );
+          },
         );
       },
     );

@@ -20,6 +20,8 @@ class _SignUpPageState extends State<SignUpPage> {
   final confirmPasswordController = TextEditingController();
 
   bool _isLoading = false;
+  bool _obscurePassword = true;
+  bool _obscureConfirm = true;
 
   @override
   void dispose() {
@@ -211,12 +213,18 @@ class _SignUpPageState extends State<SignUpPage> {
                 Icons.lock,
                 controller: passwordController,
                 isPassword: true,
+                obscure: _obscurePassword,
+                onToggle: () =>
+                    setState(() => _obscurePassword = !_obscurePassword),
               ),
               buildInput(
                 "Confirm Password",
                 Icons.check,
                 controller: confirmPasswordController,
                 isPassword: true,
+                obscure: _obscureConfirm,
+                onToggle: () =>
+                    setState(() => _obscureConfirm = !_obscureConfirm),
               ),
 
               const SizedBox(height: 30),
@@ -255,16 +263,25 @@ class _SignUpPageState extends State<SignUpPage> {
     IconData icon, {
     required TextEditingController controller,
     bool isPassword = false,
+    bool obscure = false,
+    VoidCallback? onToggle,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 15),
       child: TextField(
         controller: controller,
-        obscureText: isPassword,
+        obscureText: isPassword && obscure,
         decoration: InputDecoration(
           hintText: hint,
           prefixIcon: Icon(icon),
-          suffixIcon: isPassword ? const Icon(Icons.visibility_off) : null,
+          suffixIcon: isPassword
+              ? IconButton(
+                  icon: Icon(
+                    obscure ? Icons.visibility : Icons.visibility_off,
+                  ),
+                  onPressed: onToggle,
+                )
+              : null,
           filled: true,
           fillColor: Colors.white.withOpacity(0.6),
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(25)),

@@ -1,9 +1,11 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'activity.dart';
 import 'activity_detail.dart';
 import 'profile.dart';
 import 'search.dart';
+import '../widgets/create_activity_modal.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -20,97 +22,154 @@ class _HomePageState extends State<HomePage> {
   int _currentTab = 0;
   final TextEditingController _searchController = TextEditingController();
 
-  final List<Map<String, dynamic>> categories = [
-    {"icon": Icons.park, "title": "Afforestation"},
-    {"icon": Icons.cleaning_services, "title": "Cleaning"},
-    {"icon": Icons.recycling, "title": "Recycling"},
-    {"icon": Icons.water_drop, "title": "Water"},
-    {"icon": Icons.energy_savings_leaf, "title": "Energy"},
-    {"icon": Icons.eco, "title": "Awareness"},
-    {"icon": Icons.forest, "title": "Nature"},
-    {"icon": Icons.public, "title": "Climate"},
-    {"icon": Icons.solar_power, "title": "Solar"},
-    {"icon": Icons.compost, "title": "Compost"},
-    {"icon": Icons.grass, "title": "Green Parks"},
-    {"icon": Icons.bolt, "title": "Eco Tech"},
-    {"icon": Icons.electric_bike, "title": "Mobility"},
-    {"icon": Icons.agriculture, "title": "Farming"},
-    {"icon": Icons.pets, "title": "Wildlife"},
-    {"icon": Icons.volunteer_activism, "title": "Volunteering"},
-    {"icon": Icons.factory_outlined, "title": "Pollution"},
-    {"icon": Icons.wb_sunny_outlined, "title": "Heat Action"},
-  ];
+  List<Map<String, String>> _activities = [];
+  bool _loadingActivities = false;
 
-  final List<Map<String, String>> activities = [
-    {
-      "title": "Tree Plantation",
-      "location": "Bejaia",
-      "date": "12 Apr 2026",
-      "exp": "+50 XP",
-    },
-    {
-      "title": "Beach Cleaning",
-      "location": "Algiers",
-      "date": "15 Apr 2026",
-      "exp": "+30 XP",
-    },
-    {
-      "title": "Recycle Mission",
-      "location": "Setif",
-      "date": "18 Apr 2026",
-      "exp": "+20 XP",
-    },
-    {
-      "title": "River Protection",
-      "location": "Constantine",
-      "date": "20 Apr 2026",
-      "exp": "+45 XP",
-    },
-    {
-      "title": "Solar Camp",
-      "location": "Oran",
-      "date": "23 Apr 2026",
-      "exp": "+60 XP",
-    },
-    {
-      "title": "Eco Awareness Day",
-      "location": "Tizi Ouzou",
-      "date": "26 Apr 2026",
-      "exp": "+25 XP",
-    },
-    {
-      "title": "City Bike Challenge",
-      "location": "Blida",
-      "date": "29 Apr 2026",
-      "exp": "+40 XP",
-    },
-    {
-      "title": "School Recycling",
-      "location": "Annaba",
-      "date": "02 May 2026",
-      "exp": "+35 XP",
-    },
-  ];
+  // Categories loaded from type_activite table
+  List<Map<String, dynamic>> _categories = [];
+  bool _loadingCategories = false;
+  int? _selectedCategoryId;
+
+  // Maps icone string (stored in DB) to a Flutter IconData
+  static const Map<String, IconData> _iconMap = {
+    'park': Icons.park,
+    'cleaning_services': Icons.cleaning_services,
+    'recycling': Icons.recycling,
+    'water_drop': Icons.water_drop,
+    'energy_savings_leaf': Icons.energy_savings_leaf,
+    'eco': Icons.eco,
+    'forest': Icons.forest,
+    'public': Icons.public,
+    'solar_power': Icons.solar_power,
+    'compost': Icons.compost,
+    'grass': Icons.grass,
+    'bolt': Icons.bolt,
+    'electric_bike': Icons.electric_bike,
+    'agriculture': Icons.agriculture,
+    'pets': Icons.pets,
+    'volunteer_activism': Icons.volunteer_activism,
+    'factory': Icons.factory_outlined,
+    'wb_sunny': Icons.wb_sunny_outlined,
+    'sports_soccer': Icons.sports_soccer,
+    'school': Icons.school,
+    'health_and_safety': Icons.health_and_safety,
+  };
+
+  static IconData _iconFromName(String? name) =>
+      _iconMap[name] ?? Icons.eco_rounded;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadActivities();
+    _loadCategories();
+  }
+
+  Future<void> _loadActivities() async {
+    setState(() => _loadingActivities = true);
+    try {
+      final data = await Supabase.instance.client
+          .from('activite')
+          .select('*, preuve(url)')
+          .eq('status', 'approved')
+          .order('datecreation', ascending: false);
+
+      final loaded = <Map<String, String>>[];
+      for (final row in data as List) {
+        final xp = row['xpfinal'];
+        final dateRaw = row['datecreation'] as String?;
+        String dateStr = '';
+        if (dateRaw != null) {
+          final dt = DateTime.tryParse(dateRaw);
+          if (dt != null) {
+            dateStr = '${dt.day} ${_monthAbbr(dt.month)} ${dt.year}';
+          }
+        }
+        final preuveList = row['preuve'] as List? ?? [];
+        final imageUrl = preuveList.isNotEmpty
+            ? (preuveList.first['url'] as String? ?? '')
+            : '';
+        loaded.add({
+          'id': (row['id_act'] as int? ?? 0).toString(),
+          'title': row['titre'] as String? ?? '',
+          'location': row['localisation'] as String? ?? '',
+          'date': dateStr,
+          'exp': xp != null ? '+$xp XP' : '',
+          'id_type_act': (row['id_type_act'] as int? ?? 0).toString(),
+          'image_url': imageUrl,
+        });
+      }
+      if (mounted) setState(() => _activities = loaded);
+    } catch (_) {
+      // Keep existing list on error
+    } finally {
+      if (mounted) setState(() => _loadingActivities = false);
+    }
+  }
+
+  String _monthAbbr(int month) {
+    const m = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    return m[month - 1];
+  }
+
+  Future<void> _loadCategories() async {
+    setState(() => _loadingCategories = true);
+    try {
+      final data = await Supabase.instance.client
+          .from('type_activite')
+          .select()
+          .order('id_type_act');
+      if (mounted) {
+        setState(() {
+          _categories = (data as List)
+              .map((row) => {
+                    'id': row['id_type_act'],
+                    'title': row['nom'] as String? ?? '',
+                    'icon': _iconFromName(row['icone'] as String?),
+                  })
+              .toList();
+        });
+      }
+    } catch (_) {
+      // Fall back to empty list; UI handles empty state
+    } finally {
+      if (mounted) setState(() => _loadingCategories = false);
+    }
+  }
+
+  void _openCreateModal() {
+    showDialog(
+      context: context,
+      builder: (_) => CreateActivityModal(onActivityCreated: _loadActivities),
+    );
+  }
 
   String get _searchQuery => _searchController.text.trim().toLowerCase();
 
   List<Map<String, dynamic>> get _filteredCategories {
     if (_searchQuery.isEmpty) {
-      return categories;
+      return _categories;
     }
-    return categories
+    return _categories
         .where(
           (item) =>
-              item["title"].toString().toLowerCase().contains(_searchQuery),
+              item['title'].toString().toLowerCase().contains(_searchQuery),
         )
         .toList();
   }
 
   List<Map<String, String>> get _filteredActivities {
-    if (_searchQuery.isEmpty) {
-      return activities;
+    var list = _activities;
+    if (_selectedCategoryId != null) {
+      list = list
+          .where((a) => a['id_type_act'] == _selectedCategoryId.toString())
+          .toList();
     }
-    return activities.where((act) {
+    if (_searchQuery.isEmpty) return list;
+    return list.where((act) {
       final title = act["title"]?.toLowerCase() ?? "";
       final location = act["location"]?.toLowerCase() ?? "";
       final date = act["date"]?.toLowerCase() ?? "";
@@ -155,9 +214,11 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildFab() {
-    return Container(
-      width: 74,
-      height: 74,
+    return GestureDetector(
+      onTap: _openCreateModal,
+      child: Container(
+        width: 74,
+        height: 74,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         gradient: const LinearGradient(
@@ -174,7 +235,8 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
+        child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
+      ),
     );
   }
 
@@ -470,18 +532,18 @@ class _HomePageState extends State<HomePage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
+              Text(
                 "Categories",
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
               Text(
-                _searchQuery.isEmpty ? "Swipe ->" : "Results",
-                style: const TextStyle(
+                "Swipe ->",
+                style: TextStyle(
                   fontSize: 12,
                   color: Colors.black54,
                   fontWeight: FontWeight.w600,
@@ -490,40 +552,121 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
         ),
-        if (filteredCategories.isEmpty)
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Text("No categories found"),
-          )
-        else
-          SizedBox(
-            height: 140,
-            child: ListView.builder(
-              physics: const BouncingScrollPhysics(),
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.only(right: 16),
-              itemCount: filteredCategories.length,
-              itemBuilder: (context, i) {
-                final item = filteredCategories[i];
-                return Container(
-                  width: 120,
-                  margin: const EdgeInsets.only(left: 16),
-                  decoration: BoxDecoration(
-                    color: _lightGreen,
-                    borderRadius: BorderRadius.circular(20),
+        if (_selectedCategoryId != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+            child: Row(
+              children: [
+                const Icon(Icons.filter_list,
+                    size: 16, color: Color(0xFF1B5E20)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Filtered: ${_categories.firstWhere((c) => c['id'] == _selectedCategoryId, orElse: () => {'title': ''})['title']}',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFF1B5E20),
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                ),
+                GestureDetector(
+                  onTap: () => setState(() => _selectedCategoryId = null),
+                  child: const Row(
                     children: [
-                      Icon(item["icon"], size: 40, color: _deepGreen),
-                      const SizedBox(height: 10),
-                      Text(item["title"]),
+                      Icon(Icons.clear, size: 14, color: Colors.black54),
+                      SizedBox(width: 2),
+                      Text(
+                        'Clear',
+                        style:
+                            TextStyle(fontSize: 12, color: Colors.black54),
+                      ),
                     ],
                   ),
-                );
-              },
+                ),
+              ],
             ),
           ),
+          if (_loadingCategories)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Center(
+                child: CircularProgressIndicator(color: Color(0xFF2E7D32)),
+              ),
+            )
+          else if (filteredCategories.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Text('No categories found'),
+            )
+          else
+            SizedBox(
+              height: 140,
+              child: ListView.builder(
+                physics: const BouncingScrollPhysics(),
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.only(right: 16),
+                itemCount: filteredCategories.length,
+                itemBuilder: (context, i) {
+                  final item = filteredCategories[i];
+                  final isSelected = _selectedCategoryId == item['id'];
+                  return GestureDetector(
+                    onTap: () => setState(() {
+                      _selectedCategoryId =
+                          isSelected ? null : item['id'] as int?;
+                    }),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 120,
+                      margin: const EdgeInsets.only(left: 16),
+                      decoration: BoxDecoration(
+                        color: isSelected ? _deepGreen : _lightGreen,
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: isSelected
+                            ? const [
+                                BoxShadow(
+                                  color: Color(0x3327502E),
+                                  blurRadius: 10,
+                                  offset: Offset(0, 4),
+                                )
+                              ]
+                            : null,
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            item['icon'] as IconData,
+                            size: 40,
+                            color: isSelected ? Colors.white : _deepGreen,
+                          ),
+                          const SizedBox(height: 10),
+                          Padding(
+                            padding:
+                                const EdgeInsets.symmetric(horizontal: 8),
+                            child: Text(
+                              item['title'] as String,
+                              style: TextStyle(
+                                color: isSelected
+                                    ? Colors.white
+                                    : Colors.black87,
+                                fontWeight: isSelected
+                                    ? FontWeight.w600
+                                    : FontWeight.normal,
+                                fontSize: 12,
+                              ),
+                              textAlign: TextAlign.center,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
       ],
     );
   }
@@ -535,15 +678,39 @@ class _HomePageState extends State<HomePage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Padding(
-          padding: EdgeInsets.all(16),
-          child: Text(
-            "The Closest Activities",
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                _selectedCategoryId == null
+                    ? 'The Closest Activities'
+                    : 'Activities Found',
+                style: const TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              if (_selectedCategoryId != null)
+                Text(
+                  '${_filteredActivities.length} result${_filteredActivities.length == 1 ? '' : 's'}',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF1B5E20),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+            ],
           ),
         ),
 
-        if (filteredActivities.isEmpty)
+        if (_loadingActivities)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 32),
+            child: Center(
+              child: CircularProgressIndicator(color: Color(0xFF2E7D32)),
+            ),
+          )
+        else if (filteredActivities.isEmpty)
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16),
             child: Text("No activities found"),
@@ -556,7 +723,9 @@ class _HomePageState extends State<HomePage> {
                   context,
                   PageRouteBuilder(
                     transitionDuration: const Duration(milliseconds: 350),
-                    pageBuilder: (_, __, ___) => const ActivityDetailPage(),
+                    pageBuilder: (_, __, ___) => ActivityDetailPage(
+                      activityId: int.tryParse(act['id'] ?? '0'),
+                    ),
                     transitionsBuilder: (_, animation, __, child) {
                       final slide =
                           Tween<Offset>(
@@ -581,8 +750,10 @@ class _HomePageState extends State<HomePage> {
                   margin: const EdgeInsets.fromLTRB(16, 0, 16, 14),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(25),
-                    image: const DecorationImage(
-                      image: AssetImage("assets/images.jfif"),
+                    image: DecorationImage(
+                      image: (act['image_url']?.isNotEmpty == true)
+                          ? NetworkImage(act['image_url']!) as ImageProvider
+                          : const AssetImage('assets/images.jfif'),
                       fit: BoxFit.cover,
                     ),
                   ),

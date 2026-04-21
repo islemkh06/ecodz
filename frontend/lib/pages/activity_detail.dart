@@ -2,11 +2,13 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'activity.dart';
 import 'home.dart';
 import 'profile.dart';
 import 'search.dart';
+import 'user_profile.dart';
 
 // ---------------------------------------------------------------------------
 // Data models (mirrors DB schema)
@@ -74,6 +76,7 @@ class Validation {
 }
 
 class ActivityDetail {
+  final String? organizerId;
   final String id;
   final String title;
   final String description;
@@ -91,6 +94,7 @@ class ActivityDetail {
   final Validation? validation;
 
   const ActivityDetail({
+    this.organizerId,
     required this.id,
     required this.title,
     required this.description,
@@ -107,6 +111,76 @@ class ActivityDetail {
     required this.votes,
     this.validation,
   });
+
+  factory ActivityDetail.fromSupabase(Map<String, dynamic> json) {
+    final typeData = json['type_activite'] as Map<String, dynamic>?;
+    final niveauData = json['niveau_activite'] as Map<String, dynamic>?;
+    final profileData = json['profiles'] as Map<String, dynamic>?;
+    final preuveList = (json['preuve'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final voteList = (json['vote'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final validationList = (json['validation'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+
+    final xpMin = (niveauData?['xpmin'] as num?)?.toInt() ?? 0;
+    final xpMax = (niveauData?['xpmax'] as num?)?.toInt() ?? 100;
+
+    final startDate = json['datecreation'] != null
+        ? DateTime.tryParse(json['datecreation'] as String) ?? DateTime.now()
+        : DateTime.now();
+
+    return ActivityDetail(
+      organizerId: json['id_utilisateur'] as String?,
+      id: json['id_act'].toString(),
+      title: json['titre'] as String? ?? '',
+      description: json['description'] as String? ?? '',
+      location: json['localisation'] as String? ?? '',
+      xp: (json['xpfinal'] as num?)?.toInt() ?? 0,
+      type: typeData?['nom'] as String? ?? '',
+      status: _parseStatus(json['status'] as String?),
+      startDate: startDate,
+      expirationDate: startDate.add(const Duration(days: 7)),
+      imageUrl: 'assets/images.jfif',
+      organizer: Utilisateur(
+        nom: profileData?['full_name'] as String? ?? 'Unknown',
+        avatarUrl: 'assets/level1.png',
+        reputation: (profileData?['reputation'] as num?)?.toDouble() ?? 0.0,
+      ),
+      niveau: NiveauActivite(
+        name: niveauData?['description'] as String? ?? 'Unknown',
+        xpMin: xpMin,
+        xpMax: xpMax,
+        level: xpMin >= 400 ? 3 : (xpMin >= 200 ? 2 : 1),
+      ),
+      preuves: preuveList
+          .map((p) => Preuve(
+                imageUrl: p['url'] as String? ?? 'assets/images.jfif',
+                isBefore: (p['type'] as String?) == 'avant',
+              ))
+          .toList(),
+      votes: voteList
+          .map((v) => Vote(
+                userName: 'Participant',
+                rating: (v['valeur'] as num?)?.toDouble() ?? 0,
+                commentaire: v['commentaire'] as String? ?? '',
+              ))
+          .toList(),
+      validation: validationList.isNotEmpty
+          ? Validation(
+              phase: (validationList[0]['phase'] as String?) == 'XP'
+                  ? ActivityPhase.xp
+                  : ActivityPhase.travail,
+              status: _parseStatus(validationList[0]['status'] as String?),
+              moyenne:
+                  (validationList[0]['moyenne'] as num?)?.toDouble() ?? 0.0,
+            )
+          : null,
+    );
+  }
+
+  static ActivityStatus _parseStatus(String? s) => switch (s) {
+        'completed' => ActivityStatus.completed,
+        'approved' => ActivityStatus.approved,
+        _ => ActivityStatus.pending,
+      };
 }
 
 // ---------------------------------------------------------------------------
@@ -173,9 +247,11 @@ final _sampleActivity = ActivityDetail(
 // ---------------------------------------------------------------------------
 
 class ActivityDetailPage extends StatefulWidget {
-  final ActivityDetail? activity;
+  /// When provided, activity data is fetched from Supabase.
+  /// When null, falls back to sample data (useful for static previews).
+  final int? activityId;
 
-  const ActivityDetailPage({super.key, this.activity});
+  const ActivityDetailPage({super.key, this.activityId});
 
   @override
   State<ActivityDetailPage> createState() => _ActivityDetailPageState();
@@ -195,7 +271,10 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
   bool _bookmarked = false;
   int _currentIndex = 1; // Activity tab is parent
 
-  late final ActivityDetail _activity;
+  late ActivityDetail _activity;
+  bool _loading = true;
+  String? _error;
+
   late final AnimationController _heroCtrl;
   late final Animation<double> _heroFade;
   late final AnimationController _cardCtrl;
@@ -204,12 +283,11 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
   @override
   void initState() {
     super.initState();
-    _activity = widget.activity ?? _sampleActivity;
 
     _heroCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
-    )..forward();
+    );
     _heroFade = CurvedAnimation(parent: _heroCtrl, curve: Curves.easeOut);
 
     _cardCtrl = AnimationController(
@@ -221,9 +299,52 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
       end: Offset.zero,
     ).animate(CurvedAnimation(parent: _cardCtrl, curve: Curves.easeOutCubic));
 
-    Future.delayed(const Duration(milliseconds: 200), () {
-      if (mounted) _cardCtrl.forward();
-    });
+    if (widget.activityId != null) {
+      _fetchActivity();
+    } else {
+      _activity = _sampleActivity;
+      _loading = false;
+      _heroCtrl.forward();
+      Future.delayed(const Duration(milliseconds: 200), () {
+        if (mounted) _cardCtrl.forward();
+      });
+    }
+  }
+
+  Future<void> _fetchActivity() async {
+    try {
+      final data = await Supabase.instance.client
+          .from('activite')
+          .select(
+            '*,'
+            'type_activite(nom, icone),'
+            'niveau_activite(id_niv_act, description, xpmin, xpmax),'
+            'profiles(full_name, reputation),'
+            'preuve(id_preuve, url, type),'
+            'vote(valeur, commentaire, id_utilisateur),'
+            'validation(phase, status, moyenne)',
+          )
+          .eq('id_act', widget.activityId!)
+          .single();
+
+      if (mounted) {
+        setState(() {
+          _activity = ActivityDetail.fromSupabase(data);
+          _loading = false;
+        });
+        _heroCtrl.forward();
+        Future.delayed(const Duration(milliseconds: 200), () {
+          if (mounted) _cardCtrl.forward();
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = 'Failed to load activity.';
+          _loading = false;
+        });
+      }
+    }
   }
 
   @override
@@ -261,6 +382,52 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
   @override
   Widget build(BuildContext context) {
     SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light);
+
+    if (_loading) {
+      return Scaffold(
+        backgroundColor: _surface,
+        body: const Center(
+          child: CircularProgressIndicator(color: Color(0xFF2E7D32)),
+        ),
+      );
+    }
+
+    if (_error != null) {
+      return Scaffold(
+        backgroundColor: _surface,
+        appBar: AppBar(
+          backgroundColor: _deepGreen,
+          foregroundColor: Colors.white,
+          title: const Text('Activity'),
+        ),
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline, color: Colors.red, size: 48),
+              const SizedBox(height: 12),
+              Text(_error!),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    _loading = true;
+                    _error = null;
+                  });
+                  _fetchActivity();
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _deepGreen,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: _surface,
       extendBodyBehindAppBar: true,
@@ -777,21 +944,37 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
                   ],
                 ),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: _paleGreen,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Text(
-                  'View',
-                  style: TextStyle(
-                    color: _deepGreen,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
+              GestureDetector(
+                onTap: () {
+                  final id = _activity.organizerId;
+                  if (id == null) return;
+                  Navigator.push(
+                    context,
+                    PageRouteBuilder(
+                      transitionDuration: const Duration(milliseconds: 350),
+                      pageBuilder: (_, __, ___) =>
+                          UserProfilePage(userId: id),
+                      transitionsBuilder: (_, animation, __, child) =>
+                          FadeTransition(opacity: animation, child: child),
+                    ),
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _paleGreen,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'View',
+                    style: TextStyle(
+                      color: _deepGreen,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
                   ),
                 ),
               ),
@@ -923,12 +1106,28 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
                   children: [
                     ClipRRect(
                       borderRadius: BorderRadius.circular(18),
-                      child: Image.asset(
-                        p.imageUrl,
-                        width: 110,
-                        height: 130,
-                        fit: BoxFit.cover,
-                      ),
+                      child: p.imageUrl.startsWith('http')
+                          ? Image.network(
+                              p.imageUrl,
+                              width: 110,
+                              height: 130,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => Container(
+                                width: 110,
+                                height: 130,
+                                color: const Color(0xFFE8F5E9),
+                                child: const Icon(
+                                  Icons.broken_image_outlined,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                            )
+                          : Image.asset(
+                              p.imageUrl,
+                              width: 110,
+                              height: 130,
+                              fit: BoxFit.cover,
+                            ),
                     ),
                     // Label
                     Positioned(
@@ -1260,27 +1459,15 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
 
   Widget _buildActionButtons() {
     return switch (_activity.status) {
-      ActivityStatus.pending => Row(
-        children: [
-          Expanded(
-            child: _actionBtn(
-              label: 'Participate',
-              icon: Icons.volunteer_activism_rounded,
-              gradient: const LinearGradient(
-                colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              onTap: () {},
-            ),
-          ),
-          const SizedBox(width: 12),
-          _actionBtnSecondary(
-            icon: Icons.camera_alt_rounded,
-            label: 'Add Proof',
-            onTap: () {},
-          ),
-        ],
+      ActivityStatus.pending => _actionBtn(
+        label: 'Participate',
+        icon: Icons.volunteer_activism_rounded,
+        gradient: const LinearGradient(
+          colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        onTap: () {},
       ),
       ActivityStatus.completed => _actionBtn(
         label: 'Waiting for Approval',
@@ -1579,7 +1766,17 @@ class _FullscreenImageViewer extends StatelessWidget {
           children: [
             Center(
               child: InteractiveViewer(
-                child: Image.asset(imageUrl, fit: BoxFit.contain),
+                child: imageUrl.startsWith('http')
+                    ? Image.network(
+                        imageUrl,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, __, ___) => const Icon(
+                          Icons.broken_image_outlined,
+                          color: Colors.white54,
+                          size: 64,
+                        ),
+                      )
+                    : Image.asset(imageUrl, fit: BoxFit.contain),
               ),
             ),
             SafeArea(
