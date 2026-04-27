@@ -100,3 +100,13 @@ CREATE TABLE public.vote (
   CONSTRAINT vote_id_utilisateur_fkey FOREIGN KEY (id_utilisateur) REFERENCES public.profiles(id),
   CONSTRAINT vote_id_act_fkey FOREIGN KEY (id_act) REFERENCES public.activite(id_act)
 );
+CREATE TABLE public.vote_approbation (
+  id integer NOT NULL DEFAULT nextval('vote_approbation_id_seq'::regclass),
+  id_act integer NOT NULL,
+  id_utilisateur uuid NOT NULL,
+  valeur integer NOT NULL CHECK (valeur = ANY (ARRAY[1, '-1'::integer])),
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT vote_approbation_pkey PRIMARY KEY (id),
+  CONSTRAINT vote_approbation_id_act_fkey FOREIGN KEY (id_act) REFERENCES public.activite(id_act),
+  CONSTRAINT vote_approbation_id_utilisateur_fkey FOREIGN KEY (id_utilisateur) REFERENCES public.profiles(id)
+);

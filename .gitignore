@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Flutter subproject build folders
+frontend/build/
+frontend/.dart_tool/
+frontend/.pub/
+frontend/.flutter-plugins-dependencies

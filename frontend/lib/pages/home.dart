@@ -788,9 +788,13 @@ class _HomePageState extends State<HomePage> {
                               color: Colors.white70,
                             ),
                             const SizedBox(width: 4),
-                            Text(
-                              act["location"]!,
-                              style: const TextStyle(color: Colors.white70),
+                            Expanded(
+                              child: Text(
+                                act["location"]!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(color: Colors.white70),
+                              ),
                             ),
                           ],
                         ),
@@ -803,9 +807,13 @@ class _HomePageState extends State<HomePage> {
                               color: Colors.white70,
                             ),
                             const SizedBox(width: 4),
-                            Text(
-                              act["date"]!,
-                              style: const TextStyle(color: Colors.white70),
+                            Expanded(
+                              child: Text(
+                                act["date"]!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(color: Colors.white70),
+                              ),
                             ),
                           ],
                         ),
