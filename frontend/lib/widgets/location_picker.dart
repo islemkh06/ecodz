@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
@@ -41,6 +42,7 @@ class _LocationPickerPageState extends State<LocationPickerPage> {
   LatLng? _picked;
   String? _address;
   bool _geocoding = false;
+  bool _gettingLocation = false;
 
   // ── Search state ─────────────────────────────────────────────
   final _searchController = TextEditingController();
@@ -63,6 +65,53 @@ class _LocationPickerPageState extends State<LocationPickerPage> {
     _debounce?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  // ── GPS location ─────────────────────────────────────────────
+
+  Future<void> _useMyLocation() async {
+    setState(() => _gettingLocation = true);
+    try {
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.deniedForever ||
+          permission == LocationPermission.denied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'Location permission denied. Enable it in device settings.'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high);
+      final point = LatLng(pos.latitude, pos.longitude);
+      setState(() {
+        _picked = point;
+        _address = null;
+        _showSuggestions = false;
+      });
+      WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _mapController.move(point, 15.0));
+      await _reverseGeocode(point);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not get location: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _gettingLocation = false);
+    }
   }
 
   // ── Nominatim forward geocoding (search) ─────────────────────
@@ -174,6 +223,22 @@ class _LocationPickerPageState extends State<LocationPickerPage> {
         foregroundColor: Colors.white,
         elevation: 0,
         actions: [
+          if (_gettingLocation)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                    color: Colors.white, strokeWidth: 2),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.my_location_rounded, color: Colors.white),
+              tooltip: 'Use my location',
+              onPressed: _useMyLocation,
+            ),
           if (_picked != null && !_geocoding)
             TextButton(
               onPressed: _onConfirm,

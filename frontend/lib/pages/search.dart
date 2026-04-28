@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../widgets/create_activity_modal.dart';
 import 'activity.dart';
 import 'activity_detail.dart';
 import 'home.dart';
@@ -710,26 +711,35 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Widget _buildFab() {
-    return Container(
-      width: 74,
-      height: 74,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: const LinearGradient(
-          colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        border: Border.all(color: const Color(0xFFE8F7E7), width: 2),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x4427502E),
-            blurRadius: 20,
-            offset: Offset(0, 8),
-          ),
-        ],
+    return GestureDetector(
+      onTap: () => showDialog(
+        context: context,
+        builder: (_) => CreateActivityModal(onActivityCreated: () {
+          // Optionally refresh search results here
+          setState(() {});
+        }),
       ),
-      child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
+      child: Container(
+        width: 74,
+        height: 74,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: const LinearGradient(
+            colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          border: Border.all(color: const Color(0xFFE8F7E7), width: 2),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x4427502E),
+              blurRadius: 20,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
+      ),
     );
   }
 

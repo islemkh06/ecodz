@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'activity_detail.dart';
 import 'home.dart';
 import 'profile.dart';
 import 'search.dart';
@@ -76,6 +77,10 @@ class _ValidationItem {
   final int approveCount;
   final int rejectCount;
   final bool? myVote;
+  /// All "avant" (before) proof photo URLs
+  final List<String> beforeUrls;
+  /// All "apres" (after) proof photo URLs
+  final List<String> afterUrls;
 
   const _ValidationItem({
     required this.id,
@@ -90,6 +95,8 @@ class _ValidationItem {
     required this.approveCount,
     required this.rejectCount,
     this.myVote,
+    this.beforeUrls = const [],
+    this.afterUrls = const [],
   });
 
   int get totalVotes => approveCount + rejectCount;
@@ -359,8 +366,22 @@ class _ActivityPageState extends State<ActivityPage>
 
       final items = acts.map((act) {
         final id = act['id_act'] as int;
-        final pl = act['preuve'] as List? ?? [];
+        final pl = (act['preuve'] as List? ?? []).cast<Map<String, dynamic>>();
         final td = act['type_activite'] as Map<String, dynamic>?;
+        final beforeUrls = pl
+            .where((p) => (p['type'] as String?) == 'avant')
+            .map((p) => p['url'] as String? ?? '')
+            .where((u) => u.isNotEmpty)
+            .toList();
+        final afterUrls = pl
+            .where((p) => (p['type'] as String?) == 'apres')
+            .map((p) => p['url'] as String? ?? '')
+            .where((u) => u.isNotEmpty)
+            .toList();
+        // Hero image: prefer first after photo, else first before photo
+        final heroUrl = afterUrls.isNotEmpty
+            ? afterUrls.first
+            : (beforeUrls.isNotEmpty ? beforeUrls.first : '');
         return _ValidationItem(
           id: id,
           workerId: act['assigned_worker_id'] as String? ?? '',
@@ -369,11 +390,13 @@ class _ActivityPageState extends State<ActivityPage>
           location: act['localisation'] as String? ?? '',
           date: _fmtDate(act['datecreation'] as String?),
           xpFinal: (act['xpfinal'] as num?)?.toInt() ?? 0,
-          imageUrl: pl.isNotEmpty ? (pl.last['url'] as String? ?? '') : '',
+          imageUrl: heroUrl,
           categoryName: td?['nom'] as String? ?? '',
           approveCount: appC[id] ?? 0,
           rejectCount: rejC[id] ?? 0,
           myVote: myV[id],
+          beforeUrls: beforeUrls,
+          afterUrls: afterUrls,
         );
       }).toList();
 
@@ -1131,10 +1154,29 @@ class _ActivityPageState extends State<ActivityPage>
               : ListView.builder(
                   padding: const EdgeInsets.fromLTRB(16, 10, 16, 120),
                   itemCount: _validationItems.length,
-                  itemBuilder: (_, i) => Padding(
-                    padding: const EdgeInsets.only(bottom: 18),
-                    child: _buildValidationCard(_validationItems[i]),
-                  ),
+                  itemBuilder: (_, i) {
+                    final item = _validationItems[i];
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 18),
+                      child: GestureDetector(
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ValidationDetailPage(
+                              item: item,
+                              myId: _myId,
+                            ),
+                          ),
+                        ).then((voted) {
+                          if (voted == true) {
+                            _validationLoaded = false;
+                            _loadValidation();
+                          }
+                        }),
+                        child: _buildValidationCard(item),
+                      ),
+                    );
+                  },
                 ),
     );
   }
@@ -1192,6 +1234,11 @@ class _ActivityPageState extends State<ActivityPage>
                   if (item.categoryName.isNotEmpty)
                     _chip(Icons.category_rounded, item.categoryName),
                 ]),
+                // ── Before / After photo gallery ──────────────────────────
+                if (item.beforeUrls.isNotEmpty || item.afterUrls.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  _buildBeforeAfterPhotos(item.beforeUrls, item.afterUrls),
+                ],
                 const SizedBox(height: 14),
                 _voteProgress(item.approveCount, item.rejectCount, 2),
                 const SizedBox(height: 14),
@@ -1248,6 +1295,123 @@ class _ActivityPageState extends State<ActivityPage>
     );
   }
 
+  Widget _buildBeforeAfterPhotos(List<String> before, List<String> after) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (before.isNotEmpty) ...[
+          Row(children: [
+            Container(
+              width: 3,
+              height: 14,
+              decoration: BoxDecoration(
+                color: _deepGreen,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Text(
+              'Before',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1B5E20),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          _photoRow(before, isAfter: false),
+        ],
+        if (after.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Row(children: [
+            Container(
+              width: 3,
+              height: 14,
+              decoration: BoxDecoration(
+                color: const Color(0xFF1565C0),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Text(
+              'After',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1565C0),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          _photoRow(after, isAfter: true),
+        ],
+      ],
+    );
+  }
+
+  Widget _photoRow(List<String> urls, {required bool isAfter}) {
+    return SizedBox(
+      height: 90,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: urls.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (ctx, i) {
+          final url = urls[i];
+          return GestureDetector(
+            onTap: () => _showFullscreenImage(ctx, url),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Stack(
+                children: [
+                  Image.network(
+                    url,
+                    width: 90,
+                    height: 90,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      width: 90,
+                      height: 90,
+                      color: const Color(0xFFE8F5E9),
+                      child: const Icon(Icons.broken_image_outlined,
+                          color: Colors.grey),
+                    ),
+                  ),
+                  Positioned(
+                    bottom: 4,
+                    right: 4,
+                    child: Container(
+                      padding: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        color: const Color(0xAA000000),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Icon(Icons.zoom_in_rounded,
+                          color: Colors.white, size: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _showFullscreenImage(BuildContext ctx, String url) {
+    Navigator.push(
+      ctx,
+      PageRouteBuilder(
+        opaque: false,
+        pageBuilder: (_, __, ___) => _FullscreenImage(url: url),
+        transitionsBuilder: (_, animation, __, child) =>
+            FadeTransition(opacity: animation, child: child),
+      ),
+    );
+  }
+
   // ── History Tab ─────────────────────────────────────────────────────────────
 
   Widget _buildHistoryTab() {
@@ -1270,7 +1434,16 @@ class _ActivityPageState extends State<ActivityPage>
                   itemCount: _myHistory.length,
                   itemBuilder: (_, i) => Padding(
                     padding: const EdgeInsets.only(bottom: 14),
-                    child: _buildWorkCard(_myHistory[i], showStatus: true),
+                    child: GestureDetector(
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ActivityDetailPage(
+                              activityId: _myHistory[i].id),
+                        ),
+                      ),
+                      child: _buildWorkCard(_myHistory[i], showStatus: true),
+                    ),
                   ),
                 ),
     );
@@ -1443,21 +1616,33 @@ class _ActivityPageState extends State<ActivityPage>
                     final isJoining = _joining.contains(item.id);
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 14),
-                      child: _buildWorkCard(
-                        item,
-                        trailing: isJoining
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                    color: _green, strokeWidth: 2),
-                              )
-                            : _actionBtn(
-                                'Join',
-                                Icons.play_circle_rounded,
-                                _green,
-                                () => _joinActivity(item.id),
-                              ),
+                      child: GestureDetector(
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                ActivityDetailPage(activityId: item.id),
+                          ),
+                        ).then((_) {
+                          _availableLoaded = false;
+                          _loadAvailable();
+                        }),
+                        child: _buildWorkCard(
+                          item,
+                          trailing: isJoining
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                      color: _green, strokeWidth: 2),
+                                )
+                              : _actionBtn(
+                                  'Join',
+                                  Icons.play_circle_rounded,
+                                  _green,
+                                  () => _joinActivity(item.id),
+                                ),
+                        ),
                       ),
                     );
                   },
@@ -1489,24 +1674,36 @@ class _ActivityPageState extends State<ActivityPage>
                     final item = _activeItems[i];
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 14),
-                      child: _buildWorkCard(
-                        item,
-                        trailing: _actionBtn(
-                          'Submit Completion',
-                          Icons.camera_alt_rounded,
-                          const Color(0xFF1565C0),
-                          () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => WorkCompletionPage(
-                                activityId: item.id,
-                                activityTitle: item.title,
+                      child: GestureDetector(
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                ActivityDetailPage(activityId: item.id),
+                          ),
+                        ).then((_) {
+                          _activeLoaded = false;
+                          _loadActive();
+                        }),
+                        child: _buildWorkCard(
+                          item,
+                          trailing: _actionBtn(
+                            'Submit Completion',
+                            Icons.camera_alt_rounded,
+                            const Color(0xFF1565C0),
+                            () => Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => WorkCompletionPage(
+                                  activityId: item.id,
+                                  activityTitle: item.title,
+                                ),
                               ),
-                            ),
-                          ).then((_) {
-                            _activeLoaded = false;
-                            _loadActive();
-                          }),
+                            ).then((_) {
+                              _activeLoaded = false;
+                              _loadActive();
+                            }),
+                          ),
                         ),
                       ),
                     );
@@ -1537,7 +1734,16 @@ class _ActivityPageState extends State<ActivityPage>
                   itemCount: _doneItems.length,
                   itemBuilder: (_, i) => Padding(
                     padding: const EdgeInsets.only(bottom: 14),
-                    child: _buildWorkCard(_doneItems[i], showStatus: true),
+                    child: GestureDetector(
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ActivityDetailPage(
+                              activityId: _doneItems[i].id),
+                        ),
+                      ),
+                      child: _buildWorkCard(_doneItems[i], showStatus: true),
+                    ),
                   ),
                 ),
     );
@@ -2019,7 +2225,15 @@ class _ActivityPageState extends State<ActivityPage>
     return GestureDetector(
       onTap: () => showDialog(
         context: context,
-        builder: (_) => CreateActivityModal(onActivityCreated: () {}),
+        builder: (_) => CreateActivityModal(
+          onActivityCreated: () {
+            setState(() {
+              _availableLoaded = false;
+              _priorityLoaded = false;
+            });
+            _loadApprovalFeed();
+          },
+        ),
       ),
       child: Container(
         width: 74,
@@ -2098,6 +2312,787 @@ class _ActivityPageState extends State<ActivityPage>
         pageBuilder: (_, __, ___) => page,
         transitionsBuilder: (_, animation, __, child) =>
             FadeTransition(opacity: animation, child: child),
+      ),
+    );
+  }
+}
+
+// ── Validation Detail Page ───────────────────────────────────────────────────
+
+/// Full-screen page showing complete activity info + before/after evidence
+/// + community vote UI. Pops `true` when the user successfully casts a vote
+/// that decides the outcome (parent page should refresh), or `null` otherwise.
+class ValidationDetailPage extends StatefulWidget {
+  final _ValidationItem item;
+  final String? myId;
+
+  const ValidationDetailPage({
+    super.key,
+    required this.item,
+    required this.myId,
+  });
+
+  @override
+  State<ValidationDetailPage> createState() => _ValidationDetailPageState();
+}
+
+class _ValidationDetailPageState extends State<ValidationDetailPage> {
+  static const _green = Color(0xFF2E7D32);
+  static const _deepGreen = Color(0xFF1B5E20);
+  static const _approveColor = Color(0xFF2E7D32);
+  static const _rejectColor = Color(0xFFC62828);
+
+  bool _voting = false;
+  late bool? _myVote;
+  late int _approveCount;
+  late int _rejectCount;
+  int _afterPage = 0;
+  int _beforePage = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _myVote = widget.item.myVote;
+    _approveCount = widget.item.approveCount;
+    _rejectCount = widget.item.rejectCount;
+  }
+
+  bool get _isWorker =>
+      widget.myId != null && widget.item.workerId == widget.myId;
+  bool get _hasVoted => _myVote != null;
+
+  // ── Voting ──────────────────────────────────────────────────────────────────
+
+  Future<int?> _askXpProposal() async {
+    final ctrl =
+        TextEditingController(text: widget.item.xpFinal.toString());
+    return showDialog<int>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Propose XP Reward',
+            style: TextStyle(fontWeight: FontWeight.w800)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'How many XP should the worker earn?\n'
+              'The final reward is the average of all YES votes.',
+              style: TextStyle(fontSize: 13, color: Colors.black54),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: ctrl,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: 'XP Proposal',
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+                suffixText: 'XP',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: _green),
+            onPressed: () {
+              final val = int.tryParse(ctrl.text.trim());
+              Navigator.pop(context, val);
+            },
+            child: const Text('Confirm'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _castVote(bool approve, int? xpProposal) async {
+    final uid = widget.myId;
+    if (uid == null) return;
+    setState(() => _voting = true);
+    try {
+      final dynamic rpcResult = await Supabase.instance.client.rpc(
+        'cast_completion_vote',
+        params: {
+          'p_act_id': widget.item.id,
+          'p_user_id': uid,
+          'p_approve': approve,
+          'p_xp_proposal': xpProposal,
+        },
+      );
+      final res = (rpcResult as Map?)?.cast<String, dynamic>() ?? {};
+      if (res['error'] != null) {
+        _snack(_completionErrorMsg(res['error'] as String), isError: true);
+        return;
+      }
+      setState(() {
+        _myVote = approve;
+        if (approve) {
+          _approveCount++;
+        } else {
+          _rejectCount++;
+        }
+      });
+      final decided = res['decided'] as bool? ?? false;
+      if (decided) {
+        final newStatus = res['new_status'] as String?;
+        if (newStatus == 'completed') {
+          final xp = res['xp_awarded'] as int? ?? 0;
+          _snack('Work approved! Worker earned $xp XP.');
+        } else {
+          _snack('Work rejected – activity returned to open pool.',
+              isError: true);
+        }
+        if (mounted) Navigator.pop(context, true);
+      } else {
+        _snack(approve ? 'Vote recorded: Approved ✓' : 'Vote recorded: Rejected ✗');
+      }
+    } catch (e) {
+      _snack('Could not cast vote. Check your connection.', isError: true);
+    } finally {
+      if (mounted) setState(() => _voting = false);
+    }
+  }
+
+  void _snack(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      backgroundColor: isError ? Colors.red.shade700 : _green,
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  String _completionErrorMsg(String code) => switch (code) {
+        'already_voted' => 'You already validated this work.',
+        'voting_closed' => 'Validation is already closed.',
+        'own_work' => 'You cannot validate your own submitted work.',
+        _ => 'Could not cast vote. Please try again.',
+      };
+
+  // ── Build ───────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    final item = widget.item;
+    final totalVotes = _approveCount + _rejectCount;
+    final approveRatio =
+        totalVotes > 0 ? _approveCount / totalVotes : 0.0;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF1F8F1),
+      body: CustomScrollView(
+        slivers: [
+          // ── Hero AppBar with after photos ─────────────────────────────────
+          SliverAppBar(
+            expandedHeight: item.afterUrls.isNotEmpty ? 300 : 180,
+            pinned: true,
+            backgroundColor: _deepGreen,
+            foregroundColor: Colors.white,
+            title: const Text(
+              'Validate Work',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18),
+            ),
+            flexibleSpace: FlexibleSpaceBar(
+              background: item.afterUrls.isNotEmpty
+                  ? Stack(children: [
+                      PageView.builder(
+                        itemCount: item.afterUrls.length,
+                        onPageChanged: (p) =>
+                            setState(() => _afterPage = p),
+                        itemBuilder: (_, i) => Image.network(
+                          item.afterUrls[i],
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            color: _deepGreen,
+                            child: const Icon(Icons.eco_rounded,
+                                color: Colors.white38, size: 72),
+                          ),
+                        ),
+                      ),
+                      Positioned.fill(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.black.withOpacity(0.15),
+                                Colors.black.withOpacity(0.55),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        top: 90,
+                        right: 16,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1565C0),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Text(
+                            'AFTER',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 1.4,
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (item.afterUrls.length > 1)
+                        Positioned(
+                          bottom: 12,
+                          left: 0,
+                          right: 0,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: List.generate(
+                              item.afterUrls.length,
+                              (i) => AnimatedContainer(
+                                duration: const Duration(milliseconds: 200),
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 3),
+                                width: _afterPage == i ? 18 : 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: _afterPage == i
+                                      ? Colors.white
+                                      : Colors.white54,
+                                  borderRadius: BorderRadius.circular(99),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ])
+                  : Container(
+                      color: _deepGreen,
+                      child: const Center(
+                        child: Icon(Icons.eco_rounded,
+                            color: Colors.white24, size: 72),
+                      ),
+                    ),
+            ),
+          ),
+
+          // ── Content ───────────────────────────────────────────────────────
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 22, 20, 40),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Title + category
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          item.title,
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF1B2E1B),
+                          ),
+                        ),
+                      ),
+                      if (item.categoryName.isNotEmpty) ...[
+                        const SizedBox(width: 10),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: _deepGreen,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            item.categoryName,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Metadata chips
+                  Wrap(spacing: 8, runSpacing: 8, children: [
+                    if (item.location.isNotEmpty)
+                      _metaChip(Icons.location_on_rounded, item.location,
+                          const Color(0xFF1565C0)),
+                    if (item.date.isNotEmpty)
+                      _metaChip(Icons.calendar_today_rounded, item.date,
+                          const Color(0xFF6A1B9A)),
+                    if (item.xpFinal > 0)
+                      _metaChip(Icons.star_rounded, '${item.xpFinal} XP',
+                          const Color(0xFFE65100)),
+                  ]),
+
+                  // Description (full, no truncation)
+                  if (item.description.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border:
+                            Border.all(color: const Color(0xFFD8EDD8)),
+                      ),
+                      child: Text(
+                        item.description,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: Color(0xFF3A4A3A),
+                          height: 1.55,
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  // ── Work Evidence ─────────────────────────────────────────
+                  const SizedBox(height: 28),
+                  _sectionHeader('Work Evidence'),
+                  const SizedBox(height: 16),
+
+                  if (item.beforeUrls.isEmpty && item.afterUrls.isEmpty)
+                    _noPhotoBanner()
+                  else ...[
+                    // Before photos
+                    if (item.beforeUrls.isNotEmpty) ...[
+                      _photoLabel('Before', const Color(0xFFB71C1C),
+                          Icons.history_rounded),
+                      const SizedBox(height: 10),
+                      _photoGallery(
+                        urls: item.beforeUrls,
+                        currentPage: _beforePage,
+                        onPageChanged: (p) =>
+                            setState(() => _beforePage = p),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+
+                    // After photos
+                    if (item.afterUrls.isNotEmpty) ...[
+                      _photoLabel('After', const Color(0xFF1565C0),
+                          Icons.check_circle_outline_rounded),
+                      const SizedBox(height: 10),
+                      _photoGallery(
+                        urls: item.afterUrls,
+                        currentPage: _afterPage,
+                        onPageChanged: (p) =>
+                            setState(() => _afterPage = p),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+                  ],
+
+                  // ── Community Vote ────────────────────────────────────────
+                  _sectionHeader('Community Vote'),
+                  const SizedBox(height: 14),
+
+                  // Vote progress card
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: const Color(0xFFD8EDD8)),
+                    ),
+                    child: Column(
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Row(children: [
+                              const Icon(Icons.thumb_up_rounded,
+                                  color: _approveColor, size: 16),
+                              const SizedBox(width: 6),
+                              Text('$_approveCount Approve',
+                                  style: const TextStyle(
+                                      color: _approveColor,
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 13)),
+                            ]),
+                            Text(
+                              totalVotes == 0
+                                  ? 'No votes yet'
+                                  : '$totalVotes vote${totalVotes == 1 ? '' : 's'}',
+                              style: const TextStyle(
+                                  color: Colors.grey, fontSize: 12),
+                            ),
+                            Row(children: [
+                              Text('$_rejectCount Reject',
+                                  style: const TextStyle(
+                                      color: _rejectColor,
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 13)),
+                              const SizedBox(width: 6),
+                              const Icon(Icons.thumb_down_rounded,
+                                  color: _rejectColor, size: 16),
+                            ]),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(99),
+                          child: SizedBox(
+                            height: 10,
+                            child: LinearProgressIndicator(
+                              value: approveRatio,
+                              backgroundColor:
+                                  _rejectColor.withOpacity(0.2),
+                              valueColor:
+                                  const AlwaysStoppedAnimation<Color>(
+                                      _approveColor),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          totalVotes > 0
+                              ? '${(approveRatio * 100).round()}% community approval'
+                              : 'Be the first to vote',
+                          style: const TextStyle(
+                              color: Colors.grey, fontSize: 11),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Vote action
+                  if (_isWorker)
+                    _statusBanner(
+                      Icons.work_rounded,
+                      'This is your submitted work. You cannot vote on it.',
+                      _deepGreen,
+                    )
+                  else if (_hasVoted)
+                    _statusBanner(
+                      Icons.check_circle_rounded,
+                      'You voted: ${_myVote == true ? "Approve ✓" : "Reject ✗"}',
+                      _myVote == true ? _green : _rejectColor,
+                    )
+                  else if (_voting)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(vertical: 20),
+                        child: CircularProgressIndicator(
+                            color: _green, strokeWidth: 2.5),
+                      ),
+                    )
+                  else ...[
+                    _voteButton(
+                      label: 'Approve Work',
+                      icon: Icons.thumb_up_rounded,
+                      color: _approveColor,
+                      onTap: () async {
+                        final xp = await _askXpProposal();
+                        if (xp != null && mounted) _castVote(true, xp);
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    _voteButton(
+                      label: 'Reject Work',
+                      icon: Icons.thumb_down_rounded,
+                      color: _rejectColor,
+                      onTap: () => _castVote(false, null),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Helper widgets ──────────────────────────────────────────────────────────
+
+  Widget _sectionHeader(String text) {
+    return Row(children: [
+      Container(
+        width: 4,
+        height: 20,
+        decoration: BoxDecoration(
+          color: _deepGreen,
+          borderRadius: BorderRadius.circular(4),
+        ),
+      ),
+      const SizedBox(width: 10),
+      Text(
+        text,
+        style: const TextStyle(
+          fontSize: 16,
+          fontWeight: FontWeight.w800,
+          color: Color(0xFF1B2E1B),
+        ),
+      ),
+    ]);
+  }
+
+  Widget _photoLabel(String label, Color color, IconData icon) {
+    return Row(children: [
+      Icon(icon, size: 16, color: color),
+      const SizedBox(width: 6),
+      Text(
+        label,
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          color: color,
+        ),
+      ),
+    ]);
+  }
+
+  Widget _photoGallery({
+    required List<String> urls,
+    required int currentPage,
+    required ValueChanged<int> onPageChanged,
+  }) {
+    return Column(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: SizedBox(
+            height: 230,
+            child: PageView.builder(
+              itemCount: urls.length,
+              onPageChanged: onPageChanged,
+              itemBuilder: (ctx, i) => GestureDetector(
+                onTap: () => Navigator.push(
+                  ctx,
+                  PageRouteBuilder(
+                    opaque: false,
+                    pageBuilder: (_, __, ___) =>
+                        _FullscreenImage(url: urls[i]),
+                    transitionsBuilder: (_, anim, __, child) =>
+                        FadeTransition(opacity: anim, child: child),
+                  ),
+                ),
+                child: Image.network(
+                  urls[i],
+                  fit: BoxFit.cover,
+                  loadingBuilder: (_, child, progress) => progress == null
+                      ? child
+                      : Container(
+                          color: const Color(0xFFE8F5E9),
+                          child: const Center(
+                            child: CircularProgressIndicator(
+                                color: _green, strokeWidth: 2),
+                          ),
+                        ),
+                  errorBuilder: (_, __, ___) => Container(
+                    color: const Color(0xFFE8F5E9),
+                    child: const Center(
+                      child: Icon(Icons.broken_image_outlined,
+                          color: Colors.grey, size: 48),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (urls.length > 1) ...[
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(
+              urls.length,
+              (i) => AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                width: currentPage == i ? 18 : 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: currentPage == i
+                      ? _deepGreen
+                      : const Color(0xFFB2DFDB),
+                  borderRadius: BorderRadius.circular(99),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _metaChip(IconData icon, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: TextStyle(
+                fontSize: 12, color: color, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusBanner(IconData icon, String msg, Color color) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(children: [
+        Icon(icon, color: color, size: 20),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(msg,
+              style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13)),
+        ),
+      ]),
+    );
+  }
+
+  Widget _noPhotoBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFD8EDD8)),
+      ),
+      child: const Column(
+        children: [
+          Icon(Icons.image_not_supported_outlined,
+              color: Colors.grey, size: 40),
+          SizedBox(height: 8),
+          Text('No proof photos uploaded.',
+              style: TextStyle(color: Colors.grey, fontSize: 13)),
+        ],
+      ),
+    );
+  }
+
+  Widget _voteButton({
+    required String label,
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 15),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.35),
+              blurRadius: 14,
+              offset: const Offset(0, 5),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: Colors.white, size: 20),
+            const SizedBox(width: 10),
+            Text(label,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Fullscreen image viewer ──────────────────────────────────────────────────
+
+class _FullscreenImage extends StatelessWidget {
+  final String url;
+  const _FullscreenImage({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => Navigator.pop(context),
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
+          children: [
+            Center(
+              child: InteractiveViewer(
+                child: Image.network(
+                  url,
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => const Icon(
+                    Icons.broken_image_outlined,
+                    color: Colors.white54,
+                    size: 64,
+                  ),
+                ),
+              ),
+            ),
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: GestureDetector(
+                  onTap: () => Navigator.pop(context),
+                  child: Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: const Color(0x88000000),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child:
+                        const Icon(Icons.close_rounded, color: Colors.white),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

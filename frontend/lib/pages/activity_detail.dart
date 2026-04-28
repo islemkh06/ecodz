@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../widgets/create_activity_modal.dart';
 import 'activity.dart';
 import 'home.dart';
 import 'profile.dart';
@@ -77,6 +78,8 @@ class Validation {
 
 class ActivityDetail {
   final String? organizerId;
+  final String? assignedWorkerId;
+  final String rawStatus;   // exact DB status string
   final String id;
   final String title;
   final String description;
@@ -95,6 +98,8 @@ class ActivityDetail {
 
   const ActivityDetail({
     this.organizerId,
+    this.assignedWorkerId,
+    this.rawStatus = '',
     required this.id,
     required this.title,
     required this.description,
@@ -141,6 +146,8 @@ class ActivityDetail {
 
     return ActivityDetail(
       organizerId: json['id_utilisateur'] as String?,
+      assignedWorkerId: json['assigned_worker_id'] as String?,
+      rawStatus: json['status'] as String? ?? '',
       id: json['id_act'].toString(),
       title: json['titre'] as String? ?? '',
       description: json['description'] as String? ?? '',
@@ -289,6 +296,8 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
   bool _loading = true;
   String? _error;
 
+  bool _joiningActivity = false;
+
   late final AnimationController _heroCtrl;
   late final Animation<double> _heroFade;
   late final AnimationController _cardCtrl;
@@ -322,6 +331,68 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
       Future.delayed(const Duration(milliseconds: 200), () {
         if (mounted) _cardCtrl.forward();
       });
+    }
+  }
+
+  Future<void> _joinActivity() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+    setState(() => _joiningActivity = true);
+    try {
+      final dynamic rpcResult = await Supabase.instance.client.rpc(
+        'join_open_activity',
+        params: {
+          'p_act_id': int.parse(_activity.id),
+          'p_user_id': user.id,
+        },
+      );
+      final res = (rpcResult as Map?)?.cast<String, dynamic>() ?? {};
+      if (res['error'] != null) {
+        final code = res['error'] as String;
+        final msg = switch (code) {
+          'own_activity' => 'You cannot join your own activity.',
+          'not_available' => 'This activity is no longer available.',
+          _ => 'Could not join. Please try again.',
+        };
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(msg),
+              backgroundColor: Colors.red.shade700,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('You joined the activity! Start working.'),
+              backgroundColor: Color(0xFF2E7D32),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+          // Reload so the button updates to the new state
+          setState(() {
+            _loading = true;
+            _error = null;
+          });
+          _fetchActivity();
+        }
+      }
+    } catch (e) {
+      debugPrint('[ActivityDetail] joinActivity error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Network error. Please try again.'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _joiningActivity = false);
     }
   }
 
@@ -1518,29 +1589,56 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
   // =========================================================
 
   Widget _buildActionButtons() {
-    return switch (_activity.status) {
-      ActivityStatus.pending => _actionBtn(
-        label: 'Participate',
+    final user = Supabase.instance.client.auth.currentUser;
+    final uid = user?.id;
+    final raw = _activity.rawStatus;
+    final isCreator = uid != null && uid == _activity.organizerId;
+    final isWorker =
+        uid != null && uid == _activity.assignedWorkerId;
+    final isJoinable = (raw == 'open' || raw == 'approved') && !isCreator;
+    final alreadyJoined = raw == 'in_progress' && isWorker;
+
+    if (isJoinable) {
+      if (_joiningActivity) {
+        return _actionBtn(
+          label: 'Joining…',
+          icon: Icons.hourglass_top_rounded,
+          gradient: const LinearGradient(
+            colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          onTap: null,
+        );
+      }
+      return _actionBtn(
+        label: 'Je participe',
         icon: Icons.volunteer_activism_rounded,
         gradient: const LinearGradient(
           colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        onTap: () {},
-      ),
-      ActivityStatus.completed => _actionBtn(
-        label: 'Waiting for Approval',
-        icon: Icons.hourglass_top_rounded,
+        onTap: _joinActivity,
+      );
+    }
+
+    if (alreadyJoined) {
+      return _actionBtn(
+        label: 'You are working on this',
+        icon: Icons.directions_run_rounded,
         gradient: const LinearGradient(
           colors: [Color(0xFF1565C0), Color(0xFF0D47A1)],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
         onTap: null,
-      ),
-      ActivityStatus.approved => _actionBtn(
-        label: 'Approved',
+      );
+    }
+
+    if (raw == 'completed') {
+      return _actionBtn(
+        label: 'Completed',
         icon: Icons.check_circle_rounded,
         gradient: LinearGradient(
           colors: [
@@ -1551,7 +1649,107 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
           end: Alignment.bottomRight,
         ),
         onTap: null,
-      ),
+      );
+    }
+
+    if (raw == 'pending_validation') {
+      return _actionBtn(
+        label: 'Under Community Review',
+        icon: Icons.hourglass_top_rounded,
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1565C0), Color(0xFF0D47A1)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        onTap: null,
+      );
+    }
+
+    if (raw == 'in_progress') {
+      return _actionBtn(
+        label: 'Activity In Progress',
+        icon: Icons.directions_run_rounded,
+        gradient: LinearGradient(
+          colors: [
+            const Color(0xFF1565C0).withOpacity(0.7),
+            const Color(0xFF0D47A1).withOpacity(0.7),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        onTap: null,
+      );
+    }
+
+    if (raw == 'waiting' || raw == 'priority_pending') {
+      return _actionBtn(
+        label: raw == 'waiting'
+            ? 'Awaiting Community Approval'
+            : 'Priority Window Open',
+        icon: Icons.how_to_vote_rounded,
+        gradient: LinearGradient(
+          colors: [
+            const Color(0xFF7B1FA2).withOpacity(0.8),
+            const Color(0xFF4A148C).withOpacity(0.8),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        onTap: null,
+      );
+    }
+
+    if (raw == 'rejected') {
+      return _actionBtn(
+        label: 'Activity Rejected',
+        icon: Icons.cancel_rounded,
+        gradient: LinearGradient(
+          colors: [
+            Colors.red.shade700.withOpacity(0.7),
+            Colors.red.shade900.withOpacity(0.7),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        onTap: null,
+      );
+    }
+
+    // Fallback: original status-based display
+    return switch (_activity.status) {
+      ActivityStatus.pending => _actionBtn(
+          label: 'Je participe',
+          icon: Icons.volunteer_activism_rounded,
+          gradient: const LinearGradient(
+            colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          onTap: isCreator ? null : _joinActivity,
+        ),
+      ActivityStatus.completed => _actionBtn(
+          label: 'Waiting for Approval',
+          icon: Icons.hourglass_top_rounded,
+          gradient: const LinearGradient(
+            colors: [Color(0xFF1565C0), Color(0xFF0D47A1)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          onTap: null,
+        ),
+      ActivityStatus.approved => _actionBtn(
+          label: 'Approved',
+          icon: Icons.check_circle_rounded,
+          gradient: LinearGradient(
+            colors: [
+              const Color(0xFF2E7D32).withOpacity(0.6),
+              const Color(0xFF1B5E20).withOpacity(0.6),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          onTap: null,
+        ),
     };
   }
 
@@ -1643,26 +1841,32 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
   // =========================================================
 
   Widget _buildFab() {
-    return Container(
-      width: 74,
-      height: 74,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: const LinearGradient(
-          colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        border: Border.all(color: const Color(0xFFE8F7E7), width: 2),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x4427502E),
-            blurRadius: 20,
-            offset: Offset(0, 8),
-          ),
-        ],
+    return GestureDetector(
+      onTap: () => showDialog(
+        context: context,
+        builder: (_) => CreateActivityModal(onActivityCreated: () {}),
       ),
-      child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
+      child: Container(
+        width: 74,
+        height: 74,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: const LinearGradient(
+            colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          border: Border.all(color: const Color(0xFFE8F7E7), width: 2),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x4427502E),
+              blurRadius: 20,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
+      ),
     );
   }
 
