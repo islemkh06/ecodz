@@ -14,10 +14,14 @@ CREATE TABLE public.activite (
   id_niv_act integer,
   latitude double precision,
   longitude double precision,
+  assigned_worker_id uuid,
+  priority_deadline timestamp with time zone,
+  completed_at timestamp with time zone,
   CONSTRAINT activite_pkey PRIMARY KEY (id_act),
   CONSTRAINT activite_id_type_act_fkey FOREIGN KEY (id_type_act) REFERENCES public.type_activite(id_type_act),
   CONSTRAINT activite_id_utilisateur_fkey FOREIGN KEY (id_utilisateur) REFERENCES public.profiles(id),
-  CONSTRAINT activite_niveau_fk FOREIGN KEY (id_niv_act) REFERENCES public.niveau_activite(id_niv_act)
+  CONSTRAINT activite_niveau_fk FOREIGN KEY (id_niv_act) REFERENCES public.niveau_activite(id_niv_act),
+  CONSTRAINT activite_assigned_worker_id_fkey FOREIGN KEY (assigned_worker_id) REFERENCES public.profiles(id)
 );
 CREATE TABLE public.badge (
   id_badge integer NOT NULL DEFAULT nextval('badge_id_badge_seq'::regclass),
@@ -39,8 +43,11 @@ CREATE TABLE public.notification (
   id_utilisateur uuid,
   message text,
   created_at timestamp without time zone DEFAULT now(),
+  is_read boolean NOT NULL DEFAULT false,
+  id_act integer,
   CONSTRAINT notification_pkey PRIMARY KEY (id_message),
-  CONSTRAINT notification_id_utilisateur_fkey FOREIGN KEY (id_utilisateur) REFERENCES public.profiles(id)
+  CONSTRAINT notification_id_utilisateur_fkey FOREIGN KEY (id_utilisateur) REFERENCES public.profiles(id),
+  CONSTRAINT notification_id_act_fkey FOREIGN KEY (id_act) REFERENCES public.activite(id_act)
 );
 CREATE TABLE public.preuve (
   id_preuve integer NOT NULL DEFAULT nextval('preuve_id_preuve_seq'::regclass),
@@ -59,6 +66,7 @@ CREATE TABLE public.profiles (
   level integer DEFAULT 1,
   created_at timestamp with time zone DEFAULT now(),
   reputation integer DEFAULT 0,
+  xp integer NOT NULL DEFAULT 0,
   CONSTRAINT profiles_pkey PRIMARY KEY (id),
   CONSTRAINT profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id)
 );
@@ -109,4 +117,15 @@ CREATE TABLE public.vote_approbation (
   CONSTRAINT vote_approbation_pkey PRIMARY KEY (id),
   CONSTRAINT vote_approbation_id_act_fkey FOREIGN KEY (id_act) REFERENCES public.activite(id_act),
   CONSTRAINT vote_approbation_id_utilisateur_fkey FOREIGN KEY (id_utilisateur) REFERENCES public.profiles(id)
+);
+CREATE TABLE public.vote_completion (
+  id integer NOT NULL DEFAULT nextval('vote_completion_id_seq'::regclass),
+  id_act integer NOT NULL,
+  id_utilisateur uuid NOT NULL,
+  approve boolean NOT NULL,
+  xp_proposal integer CHECK (xp_proposal IS NULL OR xp_proposal >= 0),
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT vote_completion_pkey PRIMARY KEY (id),
+  CONSTRAINT vote_completion_id_act_fkey FOREIGN KEY (id_act) REFERENCES public.activite(id_act),
+  CONSTRAINT vote_completion_id_utilisateur_fkey FOREIGN KEY (id_utilisateur) REFERENCES public.profiles(id)
 );

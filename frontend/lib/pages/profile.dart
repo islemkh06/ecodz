@@ -7,6 +7,8 @@ import 'activity.dart';
 import 'home.dart';
 import 'login.dart';
 import 'search.dart';
+import '../services/user_service.dart';
+import '../models/level_system.dart';
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
@@ -21,16 +23,37 @@ class _ProfilePageState extends State<ProfilePage> {
   static const Color _surface = Color(0xFFF5FBF4);
 
   final supabase = Supabase.instance.client;
+  final _userService = UserService.instance;
   int _currentIndex = 3;
 
   String get _userEmail => supabase.auth.currentUser?.email ?? 'seed@ecodz.app';
 
   String get _userName {
+    if (_userService.profile?.fullName.isNotEmpty == true) {
+      return _userService.profile!.fullName;
+    }
     final metadata = supabase.auth.currentUser?.userMetadata;
     if (metadata != null && metadata['name'] != null) {
       return metadata['name'].toString();
     }
     return 'Seed';
+  }
+
+  void _onProfileChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _userService.addListener(_onProfileChanged);
+    _userService.fetch();
+  }
+
+  @override
+  void dispose() {
+    _userService.removeListener(_onProfileChanged);
+    super.dispose();
   }
 
   @override
@@ -126,24 +149,36 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                 ),
                 const SizedBox(height: 10),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(99),
-                  child: const LinearProgressIndicator(
-                    value: 1567 / 2000,
-                    minHeight: 8,
-                    color: Colors.white,
-                    backgroundColor: Color(0x55FFFFFF),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'Level 1  •  1567 / 2000 XP',
-                  style: TextStyle(
-                    color: Color(0xFFE6F5E6),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+                Builder(builder: (_) {
+                  final profile = _userService.profile;
+                  final xp = profile?.xp ?? 0;
+                  final level = profile?.level ?? 1;
+                  final progress = LevelSystem.levelProgress(xp);
+                  final nextXp = LevelSystem.levelUpperBound(level);
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(99),
+                        child: LinearProgressIndicator(
+                          value: progress,
+                          minHeight: 8,
+                          color: Colors.white,
+                          backgroundColor: const Color(0x55FFFFFF),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Level $level  •  $xp / $nextXp XP',
+                        style: const TextStyle(
+                          color: Color(0xFFE6F5E6),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  );
+                }),
               ],
             ),
           ),
@@ -153,28 +188,32 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Widget _buildStatsRow() {
+    final profile = _userService.profile;
+    final completed = profile?.completedCount ?? 0;
+    final xp = profile?.xp ?? 0;
+    final level = profile?.level ?? 1;
     return Row(
-      children: const [
+      children: [
         Expanded(
           child: _ProfileStatCard(
             title: 'Completed',
-            value: '8',
+            value: '$completed',
             icon: Icons.task_alt_rounded,
           ),
         ),
-        SizedBox(width: 10),
+        const SizedBox(width: 10),
         Expanded(
           child: _ProfileStatCard(
-            title: 'Points',
-            value: '1260',
+            title: 'XP Earned',
+            value: '$xp',
             icon: Icons.stars_rounded,
           ),
         ),
-        SizedBox(width: 10),
+        const SizedBox(width: 10),
         Expanded(
           child: _ProfileStatCard(
-            title: 'Badges',
-            value: '3',
+            title: 'Level',
+            value: '$level',
             icon: Icons.workspace_premium_rounded,
           ),
         ),

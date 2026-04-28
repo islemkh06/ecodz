@@ -6,6 +6,8 @@ import 'activity_detail.dart';
 import 'profile.dart';
 import 'search.dart';
 import '../widgets/create_activity_modal.dart';
+import '../services/user_service.dart';
+import '../models/level_system.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -29,6 +31,9 @@ class _HomePageState extends State<HomePage> {
   List<Map<String, dynamic>> _categories = [];
   bool _loadingCategories = false;
   int? _selectedCategoryId;
+
+  // Dynamic user profile
+  final _userService = UserService.instance;
 
   // Maps icone string (stored in DB) to a Flutter IconData
   static const Map<String, IconData> _iconMap = {
@@ -63,6 +68,12 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _loadActivities();
     _loadCategories();
+    _userService.addListener(_onProfileChanged);
+    _userService.fetch();
+  }
+
+  void _onProfileChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadActivities() async {
@@ -71,7 +82,7 @@ class _HomePageState extends State<HomePage> {
       final data = await Supabase.instance.client
           .from('activite')
           .select('*, preuve(url)')
-          .eq('status', 'approved')
+          .inFilter('status', ['open', 'approved'])
           .order('datecreation', ascending: false);
 
       final loaded = <Map<String, String>>[];
@@ -183,6 +194,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    _userService.removeListener(_onProfileChanged);
     _searchController.dispose();
     super.dispose();
   }
@@ -399,67 +411,107 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(width: 14),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Hi, Khaled',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'Level 1',
-                  style: TextStyle(
-                    color: Color(0xFFE6F5E6),
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(99),
-                  child: const LinearProgressIndicator(
-                    value: 1567 / 2000,
-                    minHeight: 8,
-                    color: Colors.white,
-                    backgroundColor: Color(0x55FFFFFF),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  '1567 / 2000 XP',
-                  style: TextStyle(
-                    color: Color(0xFFE6F5E6),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _buildStatChip(
-                        label: 'Activity Completed',
-                        value: '1',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _buildStatChip(
-                        label: 'Activity to Complete',
-                        value: '1',
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+            child: _buildHeaderContent(),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildHeaderContent() {
+    final profile = _userService.profile;
+    final loading = _userService.loading && profile == null;
+
+    if (loading) {
+      return const SizedBox(
+        height: 120,
+        child: Center(
+          child: CircularProgressIndicator(
+            color: Colors.white,
+            strokeWidth: 2.5,
+          ),
+        ),
+      );
+    }
+
+    final name = profile?.fullName ?? 'User';
+    final xp = profile?.xp ?? 0;
+    final level = profile?.level ?? LevelSystem.calculateLevel(xp);
+    final levelTitle = LevelSystem.levelTitle(level);
+    final progress = LevelSystem.levelProgress(xp);
+    final nextXp = LevelSystem.levelUpperBound(level);
+    final completed = profile?.completedCount ?? 0;
+    final inProgress = profile?.inProgressCount ?? 0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Hi, $name',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 24,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: const Color(0x33FFFFFF),
+                borderRadius: BorderRadius.circular(99),
+              ),
+              child: Text(
+                'Lv.$level · $levelTitle',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(99),
+          child: LinearProgressIndicator(
+            value: progress,
+            minHeight: 8,
+            color: Colors.white,
+            backgroundColor: const Color(0x55FFFFFF),
+          ),
+        ),
+        const SizedBox(height: 5),
+        Text(
+          '$xp / $nextXp XP',
+          style: const TextStyle(
+            color: Color(0xFFE6F5E6),
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: _buildStatChip(
+                label: 'Completed',
+                value: '$completed',
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _buildStatChip(
+                label: 'In Progress',
+                value: '$inProgress',
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 

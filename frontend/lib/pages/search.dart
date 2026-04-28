@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -29,6 +31,11 @@ class _SearchPageState extends State<SearchPage> {
   List<String> _typeFilters = ['All'];
   bool _loadingActivities = false;
   bool _loadingFilters = false;
+
+  // GPS state
+  bool _detectingLocation = false;
+  String? _detectedCity;
+  LatLng? _userPosition;
 
   int _currentIndex = 2;
   String _selectedFilter = 'All';
@@ -68,7 +75,7 @@ class _SearchPageState extends State<SearchPage> {
       var query = Supabase.instance.client
           .from('activite')
           .select('id_act, titre, localisation, latitude, longitude, type_activite(nom)')
-          .eq('status', 'approved');
+          .inFilter('status', ['open', 'approved', 'priority_pending']);
 
       final q = _searchController.text.trim();
       if (q.isNotEmpty) {
@@ -101,12 +108,136 @@ class _SearchPageState extends State<SearchPage> {
     }
   }
 
+  // GPS — detect current location, reverse geocode, auto-fill search, center map
+  Future<void> _detectMyLocation() async {
+    setState(() => _detectingLocation = true);
+    try {
+      // Check & request permission
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                permission == LocationPermission.deniedForever
+                    ? 'Location permission permanently denied. Enable it in app settings.'
+                    : 'Location permission denied.',
+              ),
+              backgroundColor: Colors.red.shade700,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+
+      // Check if GPS service is enabled
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('GPS is disabled. Please enable location services.'),
+              backgroundColor: Colors.orange,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
+
+      // Get coordinates
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.medium,
+          timeLimit: Duration(seconds: 15),
+        ),
+      );
+
+      final userLatLng = LatLng(pos.latitude, pos.longitude);
+
+      // Reverse geocode to city name
+      String cityName = '';
+      try {
+        final placemarks = await placemarkFromCoordinates(
+          pos.latitude,
+          pos.longitude,
+        );
+        if (placemarks.isNotEmpty) {
+          final p = placemarks.first;
+          cityName = p.locality?.isNotEmpty == true
+              ? p.locality!
+              : (p.administrativeArea ?? '');
+        }
+      } catch (_) {
+        // Reverse geocode failure is non-fatal — keep coordinates, skip city
+      }
+
+      if (mounted) {
+        setState(() {
+          _userPosition = userLatLng;
+          _detectedCity = cityName.isNotEmpty ? cityName : null;
+        });
+
+        // Auto-fill the search field with the detected city
+        if (cityName.isNotEmpty) {
+          _searchController.text = cityName;
+        }
+
+        // Center map on user
+        _mapController.move(userLatLng, 13);
+
+        // Reload activities filtered by location
+        _loadActivities();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not detect location: $e'),
+            backgroundColor: Colors.red.shade700,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _detectingLocation = false);
+    }
+  }
+
+  // Distance in km between user and activity (null if no user position or no point)
+  double? _distanceTo(Map<String, dynamic> activity) {
+    final userPos = _userPosition;
+    final point = activity['point'] as LatLng?;
+    if (userPos == null || point == null) return null;
+    const Distance distance = Distance();
+    return distance.as(LengthUnit.Kilometer, userPos, point);
+  }
+
   List<Map<String, dynamic>> get _filteredActivities {
-    return _allActivities.where((activity) {
+    var list = _allActivities.where((activity) {
       final matchesFilter = _selectedFilter == 'All' ||
           activity['category'] == _selectedFilter;
       return matchesFilter;
     }).toList();
+
+    // If user position is known, sort nearest first
+    if (_userPosition != null) {
+      list.sort((a, b) {
+        final da = _distanceTo(a);
+        final db = _distanceTo(b);
+        if (da == null && db == null) return 0;
+        if (da == null) return 1;
+        if (db == null) return -1;
+        return da.compareTo(db);
+      });
+    }
+
+    return list;
   }
 
   @override
@@ -187,80 +318,160 @@ class _SearchPageState extends State<SearchPage> {
   // ── Search bar ────────────────────────────────────────────────
 
   Widget _buildTopSearchBar() {
-    return Row(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Expanded(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.92),
-              borderRadius: BorderRadius.circular(20),
-              boxShadow: const [
-                BoxShadow(
-                  color: Color(0x1A234A29),
-                  blurRadius: 16,
-                  offset: Offset(0, 8),
+        Row(
+          children: [
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.92),
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1A234A29),
+                      blurRadius: 16,
+                      offset: Offset(0, 8),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            child: TextField(
-              controller: _searchController,
-              onChanged: (_) => _loadActivities(),
-              onSubmitted: (_) => _loadActivities(),
-              decoration: const InputDecoration(
-                icon: Icon(Icons.search_rounded),
-                hintText: 'Search activities near you',
-                border: InputBorder.none,
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: (_) => _loadActivities(),
+                  onSubmitted: (_) => _loadActivities(),
+                  decoration: const InputDecoration(
+                    icon: Icon(Icons.search_rounded),
+                    hintText: 'Search activities near you',
+                    border: InputBorder.none,
+                  ),
+                ),
               ),
             ),
-          ),
+            const SizedBox(width: 10),
+            // GPS "Use My Location" button
+            GestureDetector(
+              onTap: _detectingLocation ? null : _detectMyLocation,
+              child: Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: _userPosition != null
+                      ? const Color(0xFF43A047)
+                      : const Color(0xFF1565C0),
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x2A000000),
+                      blurRadius: 16,
+                      offset: Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: _detectingLocation
+                    ? const Padding(
+                        padding: EdgeInsets.all(16),
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2.5,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.my_location_rounded,
+                        color: Colors.white,
+                        size: 24,
+                      ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            GestureDetector(
+              onTap: () =>
+                  setState(() => _showNearbySheet = !_showNearbySheet),
+              child: Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: _green,
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1F214728),
+                      blurRadius: 16,
+                      offset: Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  _showNearbySheet
+                      ? Icons.keyboard_arrow_down_rounded
+                      : Icons.keyboard_arrow_up_rounded,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            GestureDetector(
+              onTap: _openFilterSheet,
+              child: Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: _deepGreen,
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1F214728),
+                      blurRadius: 16,
+                      offset: Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: const Icon(Icons.tune_rounded, color: Colors.white),
+              ),
+            ),
+          ],
         ),
-        const SizedBox(width: 10),
-        GestureDetector(
-          onTap: () =>
-              setState(() => _showNearbySheet = !_showNearbySheet),
-          child: Container(
-            width: 56,
-            height: 56,
-            decoration: BoxDecoration(
-              color: _green,
-              borderRadius: BorderRadius.circular(18),
-              boxShadow: const [
-                BoxShadow(
-                  color: Color(0x1F214728),
-                  blurRadius: 16,
-                  offset: Offset(0, 8),
+        // Detected city label shown below the search bar
+        if (_detectedCity != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6, left: 4),
+            child: Row(
+              children: [
+                const Icon(Icons.location_on_rounded,
+                    size: 14, color: Color(0xFF43A047)),
+                const SizedBox(width: 4),
+                Text(
+                  'Using: $_detectedCity',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF43A047),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _userPosition = null;
+                      _detectedCity = null;
+                    });
+                    _searchController.clear();
+                    _loadActivities();
+                  },
+                  child: const Text(
+                    'Clear',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF1565C0),
+                      fontWeight: FontWeight.w600,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
                 ),
               ],
             ),
-            child: Icon(
-              _showNearbySheet
-                  ? Icons.keyboard_arrow_down_rounded
-                  : Icons.keyboard_arrow_up_rounded,
-              color: Colors.white,
-            ),
           ),
-        ),
-        const SizedBox(width: 10),
-        GestureDetector(
-          onTap: _openFilterSheet,
-          child: Container(
-            width: 56,
-            height: 56,
-            decoration: BoxDecoration(
-              color: _deepGreen,
-              borderRadius: BorderRadius.circular(18),
-              boxShadow: const [
-                BoxShadow(
-                  color: Color(0x1F214728),
-                  blurRadius: 16,
-                  offset: Offset(0, 8),
-                ),
-              ],
-            ),
-            child: const Icon(Icons.tune_rounded, color: Colors.white),
-          ),
-        ),
       ],
     );
   }
@@ -336,6 +547,7 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Widget _buildNearbyItem(Map<String, dynamic> activity) {
+    final dist = _distanceTo(activity);
     return GestureDetector(
       onTap: () {
         final id = activity['id'] as int?;
@@ -386,6 +598,17 @@ class _SearchPageState extends State<SearchPage> {
                     activity['location'] as String,
                     style: const TextStyle(color: Color(0xFF507258)),
                   ),
+                  if (dist != null)
+                    Text(
+                      dist < 1
+                          ? '${(dist * 1000).round()} m away'
+                          : '${dist.toStringAsFixed(1)} km away',
+                      style: const TextStyle(
+                        color: Color(0xFF1565C0),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                 ],
               ),
             ),

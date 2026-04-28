@@ -127,6 +127,18 @@ class ActivityDetail {
         ? DateTime.tryParse(json['datecreation'] as String) ?? DateTime.now()
         : DateTime.now();
 
+    // Use first 'avant' photo as hero; fall back to first photo; then asset
+    final heroUrl = preuveList
+        .where((p) => (p['type'] as String?) == 'avant')
+        .map((p) => p['url'] as String?)
+        .whereType<String>()
+        .firstOrNull ??
+        preuveList
+            .map((p) => p['url'] as String?)
+            .whereType<String>()
+            .firstOrNull ??
+        'assets/images.jfif';
+
     return ActivityDetail(
       organizerId: json['id_utilisateur'] as String?,
       id: json['id_act'].toString(),
@@ -138,7 +150,7 @@ class ActivityDetail {
       status: _parseStatus(json['status'] as String?),
       startDate: startDate,
       expirationDate: startDate.add(const Duration(days: 7)),
-      imageUrl: 'assets/images.jfif',
+      imageUrl: heroUrl,
       organizer: Utilisateur(
         nom: profileData?['full_name'] as String? ?? 'Unknown',
         avatarUrl: 'assets/level1.png',
@@ -178,7 +190,9 @@ class ActivityDetail {
 
   static ActivityStatus _parseStatus(String? s) => switch (s) {
         'completed' => ActivityStatus.completed,
-        'approved' => ActivityStatus.approved,
+        'approved' ||
+        'pending_validation' =>
+          ActivityStatus.approved,
         _ => ActivityStatus.pending,
       };
 }
@@ -312,21 +326,53 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
   }
 
   Future<void> _fetchActivity() async {
+    final id = widget.activityId;
+    if (id == null || id <= 0) {
+      debugPrint('[ActivityDetail] Invalid activityId: $id — falling back to sample');
+      if (mounted) {
+        setState(() {
+          _activity = _sampleActivity;
+          _loading = false;
+        });
+        _heroCtrl.forward();
+        Future.delayed(const Duration(milliseconds: 200), () {
+          if (mounted) _cardCtrl.forward();
+        });
+      }
+      return;
+    }
+
+    debugPrint('[ActivityDetail] Fetching activity id=$id');
     try {
+      // Use FK hint for profiles because activite now has TWO foreign keys
+      // to profiles (id_utilisateur and assigned_worker_id). Without the hint
+      // PostgREST throws an "ambiguous" error and the page never loads.
       final data = await Supabase.instance.client
           .from('activite')
           .select(
             '*,'
             'type_activite(nom, icone),'
             'niveau_activite(id_niv_act, description, xpmin, xpmax),'
-            'profiles(full_name, reputation),'
+            'profiles!activite_id_utilisateur_fkey(full_name, reputation),'
             'preuve(id_preuve, url, type),'
             'vote(valeur, commentaire, id_utilisateur),'
             'validation(phase, status, moyenne)',
           )
-          .eq('id_act', widget.activityId!)
-          .single();
+          .eq('id_act', id)
+          .maybeSingle();
 
+      if (data == null) {
+        debugPrint('[ActivityDetail] No activity found for id=$id');
+        if (mounted) {
+          setState(() {
+            _error = 'Activity not found.';
+            _loading = false;
+          });
+        }
+        return;
+      }
+
+      debugPrint('[ActivityDetail] Data received: ${data.keys.toList()}');
       if (mounted) {
         setState(() {
           _activity = ActivityDetail.fromSupabase(data);
@@ -337,10 +383,11 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
           if (mounted) _cardCtrl.forward();
         });
       }
-    } catch (e) {
+    } catch (e, stack) {
+      debugPrint('[ActivityDetail] Error fetching activity: $e\n$stack');
       if (mounted) {
         setState(() {
-          _error = 'Failed to load activity.';
+          _error = 'Failed to load activity details.\n$e';
           _loading = false;
         });
       }
@@ -501,12 +548,25 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
               bottomLeft: Radius.circular(28),
               bottomRight: Radius.circular(28),
             ),
-            child: Image.asset(
-              _activity.imageUrl,
-              height: 270,
-              width: double.infinity,
-              fit: BoxFit.cover,
-            ),
+            child: _activity.imageUrl.startsWith('http')
+                ? Image.network(
+                    _activity.imageUrl,
+                    height: 270,
+                    width: double.infinity,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Image.asset(
+                      'assets/images.jfif',
+                      height: 270,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                    ),
+                  )
+                : Image.asset(
+                    _activity.imageUrl,
+                    height: 270,
+                    width: double.infinity,
+                    fit: BoxFit.cover,
+                  ),
           ),
           // Gradient overlay
           ClipRRect(
