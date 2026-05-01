@@ -4,6 +4,9 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'location_picker.dart';
+import 'duplicate_check_modal.dart';
+import '../services/activity_duplicate_service.dart';
+import '../services/photo_metadata_service.dart';
 
 class CreateActivityModal extends StatefulWidget {
   final VoidCallback onActivityCreated;
@@ -90,6 +93,42 @@ class _CreateActivityModalState extends State<CreateActivityModal> {
     }
   }
 
+  // ── Duplicate check ────────────────────────────────────────────────────────
+
+  /// Returns true if the user wants to proceed with creation,
+  /// false if they cancelled or chose to join an existing activity.
+  Future<bool> _runDuplicateCheck() async {
+    final loc = _selectedLocation;
+    if (loc == null || _selectedType == null) return true; // skip if no location/type
+
+    final result = await ActivityDuplicateService.instance.check(
+      lat:       loc.latitude,
+      lon:       loc.longitude,
+      typeId:    _selectedType!,
+      radius:    500,
+      titleHint: _titreController.text.trim().isEmpty
+                     ? null
+                     : _titreController.text.trim(),
+    );
+
+    if (!result.hasDuplicates) return true;
+    if (!mounted) return false;
+
+    final choice = await showDuplicateCheckModal(
+      context,
+      checkResult: result,
+    );
+
+    if (choice == null || choice.action == DuplicateAction.cancel) return false;
+    if (choice.action == DuplicateAction.joinExisting) {
+      // User wants to participate in the existing activity — close modal
+      if (mounted) Navigator.of(context).pop();
+      return false;
+    }
+    // DuplicateAction.proceedCreate — user confirmed creating a new one
+    return true;
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -104,7 +143,14 @@ class _CreateActivityModalState extends State<CreateActivityModal> {
       return;
     }
 
+    // ── Anti-duplication check ───────────────────────────────────────────────
     setState(() => _submitting = true);
+    final shouldProceed = await _runDuplicateCheck();
+    if (!shouldProceed) {
+      if (mounted) setState(() => _submitting = false);
+      return;
+    }
+
     try {
       // 0. Ensure a profiles row exists (guards against the FK violation
       //    that occurs when the DB trigger hasn't run yet for this user).
@@ -153,11 +199,23 @@ class _CreateActivityModalState extends State<CreateActivityModal> {
             );
         final imageUrl =
             _supabase.storage.from('activity_image').getPublicUrl(path);
-        await _supabase.from('preuve').insert({
+        final preuveRow = await _supabase.from('preuve').insert({
           'url': imageUrl,
           'type': 'avant',
           'id_act': activityId,
-        });
+        }).select('id_preuve').single();
+
+        // 2a. Extract & persist EXIF metadata (non-blocking, best-effort)
+        final preuveId = preuveRow['id_preuve'] as int?;
+        if (preuveId != null) {
+          final meta = await PhotoMetadataService.instance.extractMetadata(bytes);
+          await PhotoMetadataService.instance.saveMetadata(
+            preuveId:  preuveId,
+            actId:     activityId,
+            photoType: 'avant',
+            meta:      meta,
+          );
+        }
       }
 
       if (mounted) {

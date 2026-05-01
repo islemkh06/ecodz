@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../widgets/create_activity_modal.dart';
 import 'activity.dart';
+import 'event_detail_page.dart';
 import 'home.dart';
 import 'profile.dart';
 import 'search.dart';
@@ -566,7 +567,7 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
                   child: FadeTransition(
                     opacity: _heroFade,
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 140),
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 200),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -597,7 +598,28 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
             bottom: 90,
             left: 16,
             right: 16,
-            child: _buildActionButtons(),
+            child: widget.activityId != null
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _actionBtnSecondary(
+                        icon: Icons.event_rounded,
+                        label: 'Events',
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => EventDetailPage(
+                              actId: widget.activityId!,
+                              activityTitle: _activity.title,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildActionButtons(),
+                    ],
+                  )
+                : _buildActionButtons(),
           ),
         ],
       ),

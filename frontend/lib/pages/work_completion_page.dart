@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/photo_metadata_service.dart';
 
 class WorkCompletionPage extends StatefulWidget {
   final int activityId;
@@ -106,7 +107,7 @@ class _WorkCompletionPageState extends State<WorkCompletionPage> {
         if (mounted) setState(() => _uploadedCount = i + 1);
       }
 
-      // Insert preuve rows — 'preuve' table has no id_utilisateur column
+      // Insert preuve rows and collect inserted IDs for EXIF metadata
       final preuveRows = uploadedUrls
           .map((url) => {
                 'id_act': widget.activityId,
@@ -114,7 +115,31 @@ class _WorkCompletionPageState extends State<WorkCompletionPage> {
                 'type': 'apres',
               })
           .toList();
-      await Supabase.instance.client.from('preuve').insert(preuveRows);
+      final insertedPreuves = await Supabase.instance.client
+          .from('preuve')
+          .insert(preuveRows)
+          .select('id_preuve');
+
+      // Extract & save EXIF metadata for each uploaded photo (best-effort)
+      final metaSvc = PhotoMetadataService.instance;
+      for (int i = 0; i < _selectedImages.length; i++) {
+        final preuveId = insertedPreuves.length > i
+            ? insertedPreuves[i]['id_preuve'] as int?
+            : null;
+        if (preuveId == null) continue;
+        try {
+          final bytes = await _selectedImages[i].readAsBytes();
+          final meta  = await metaSvc.extractMetadata(bytes);
+          await metaSvc.saveMetadata(
+            preuveId:  preuveId,
+            actId:     widget.activityId,
+            photoType: 'apres',
+            meta:      meta,
+          );
+        } catch (_) {
+          // Non-critical — do not block completion submission
+        }
+      }
 
       // Call the RPC to mark as pending_validation
       final dynamic rpcResult = await Supabase.instance.client.rpc(
