@@ -2,11 +2,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'activity_detail.dart';
+import 'group_activity_detail_page.dart';
 import 'home.dart';
 import 'profile.dart';
 import 'search.dart';
 import 'work_completion_page.dart';
-import '../widgets/create_activity_modal.dart';
 import '../widgets/global_fab.dart';
 import '../services/user_service.dart';
 
@@ -26,6 +26,7 @@ class _ApprovalItem {
   final int approveCount;
   final int rejectCount;
   final int? myVote;
+  final String activityMode;
 
   const _ApprovalItem({
     required this.id,
@@ -41,6 +42,7 @@ class _ApprovalItem {
     required this.approveCount,
     required this.rejectCount,
     this.myVote,
+    this.activityMode = 'single',
   });
 
   int get totalVotes => approveCount + rejectCount;
@@ -62,6 +64,7 @@ class _ApprovalItem {
         approveCount: v == 1 ? approveCount + 1 : approveCount,
         rejectCount: v == -1 ? rejectCount + 1 : rejectCount,
         myVote: v,
+        activityMode: activityMode,
       );
 }
 
@@ -244,7 +247,7 @@ class _ActivityPageState extends State<ActivityPage>
           .from('activite')
           .select(
             'id_act, id_utilisateur, titre, description, localisation, '
-            'datecreation, xpfinal, type_activite(nom), '
+            'datecreation, xpfinal, activity_mode, type_activite(nom), '
             'niveau_activite(description), preuve(url)',
           )
           .eq('status', 'waiting')
@@ -301,6 +304,7 @@ class _ActivityPageState extends State<ActivityPage>
           approveCount: appC[id] ?? 0,
           rejectCount: rejC[id] ?? 0,
           myVote: myV[id],
+          activityMode: act['activity_mode'] as String? ?? 'single',
         );
       }).toList();
 
@@ -1043,7 +1047,25 @@ class _ActivityPageState extends State<ActivityPage>
     final isOwner = item.isOwner(_myId);
     final isVoting = _voting.contains(item.id);
 
-    return _card(
+    return GestureDetector(
+      onTap: () {
+        if (item.activityMode == 'group') {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => GroupActivityDetailPage(activityId: item.id),
+            ),
+          );
+        } else {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ActivityDetailPage(activityId: item.id),
+            ),
+          );
+        }
+      },
+      child: _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1132,6 +1154,7 @@ class _ActivityPageState extends State<ActivityPage>
           ),
         ],
       ),
+    ),
     );
   }
 

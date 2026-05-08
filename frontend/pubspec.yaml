@@ -67,6 +67,8 @@ flutter:
 
   assets:
     - assets/level1.png
+    - assets/level2.png
+    - assets/level3.png
     - assets/images.jfif
 
   # To add assets to your application, add an assets section, like this:

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/group_activity_service.dart';
@@ -13,8 +14,8 @@ class GroupActivityDetailPage extends StatefulWidget {
 }
 
 class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
-  static const Color _blue = Color(0xFF0D47A1);
-  static const Color _lightBlue = Color(0xFFE3F2FD);
+  static const Color _green = Color(0xFF2E7D32);
+  static const Color _deepGreen = Color(0xFF1B5E20);
   static const Color _surface = Color(0xFFF5FBF4);
 
   GroupActivity? _activity;
@@ -22,7 +23,15 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
   bool _loading = true;
   bool _loadingParticipants = false;
   bool _toggling = false;
+  bool _priorityActing = false;
   String? _error;
+
+  // ── Priority countdown ──────────────────────────────────────────────────────
+  Timer? _priorityTimer;
+  int _countdownSeconds = 0;
+
+  // ── Realtime subscription ───────────────────────────────────────────────────
+  RealtimeChannel? _realtimeChannel;
 
   String? get _myId => Supabase.instance.client.auth.currentUser?.id;
 
@@ -30,6 +39,119 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
   void initState() {
     super.initState();
     _load();
+    _subscribeToActivity();
+  }
+
+  // ── Realtime subscription ───────────────────────────────────────────────────
+  void _subscribeToActivity() {
+    _realtimeChannel = Supabase.instance.client
+        .channel('grp_act_${widget.activityId}')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'activite',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'id_act',
+            value: widget.activityId,
+          ),
+          callback: (payload) {
+            // Row changed (e.g., status → priority_pending after vote)
+            if (mounted) _load();
+          },
+        )
+        .subscribe();
+  }
+
+  // ── Priority countdown ──────────────────────────────────────────────────────
+  void _startPriorityCountdown() {
+    _stopPriorityCountdown();
+    final deadline = _activity?.priorityDeadline;
+    if (deadline == null) return;
+
+    final remaining = deadline.difference(DateTime.now());
+    if (remaining.isNegative) {
+      _expirePriority();
+      return;
+    }
+
+    setState(() => _countdownSeconds = remaining.inSeconds.clamp(0, 60));
+
+    _priorityTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final rem = (_activity?.priorityDeadline
+                  ?.difference(DateTime.now())
+                  .inSeconds ??
+              -1)
+          .clamp(0, 60);
+      if (rem <= 0) {
+        _stopPriorityCountdown();
+        _expirePriority();
+      } else {
+        setState(() => _countdownSeconds = rem);
+      }
+    });
+  }
+
+  void _stopPriorityCountdown() {
+    _priorityTimer?.cancel();
+    _priorityTimer = null;
+  }
+
+  Future<void> _expirePriority() async {
+    await GroupActivityService.instance.expireCreatorPriority(widget.activityId);
+    if (mounted) _load();
+  }
+
+  // ── Priority accept / decline ───────────────────────────────────────────────
+  Future<void> _acceptPriority() async {
+    setState(() => _priorityActing = true);
+    final err = await GroupActivityService.instance
+        .acceptCreatorPriority(widget.activityId);
+    if (!mounted) return;
+    if (err != null) {
+      _snack(err, isError: true);
+    } else {
+      _snack('You joined! The event is now open to all participants.');
+      _stopPriorityCountdown();
+    }
+    setState(() => _priorityActing = false);
+    await _load();
+  }
+
+  Future<void> _declinePriority() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Skip priority spot?'),
+        content: const Text(
+            'The event will immediately open to other participants. You can still join normally afterwards.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Skip'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _priorityActing = true);
+    final err = await GroupActivityService.instance
+        .declineCreatorPriority(widget.activityId);
+    if (!mounted) return;
+    if (err != null) {
+      _snack(err, isError: true);
+    } else {
+      _snack('Priority skipped. The event is now public.');
+      _stopPriorityCountdown();
+    }
+    setState(() => _priorityActing = false);
+    await _load();
   }
 
   Future<void> _load() async {
@@ -45,6 +167,12 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
         _activity = act;
         _loading = false;
       });
+      // Start or stop countdown based on priority phase
+      if (act.isPriorityPending && act.organizerId == _myId) {
+        _startPriorityCountdown();
+      } else {
+        _stopPriorityCountdown();
+      }
       _loadParticipants();
     } catch (e) {
       if (mounted) setState(() { _error = e.toString(); _loading = false; });
@@ -92,9 +220,16 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
   void _snack(String msg, {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg),
-      backgroundColor: isError ? Colors.red.shade700 : _blue,
+      backgroundColor: isError ? Colors.red.shade700 : _green,
       behavior: SnackBarBehavior.floating,
     ));
+  }
+
+  @override
+  void dispose() {
+    _stopPriorityCountdown();
+    _realtimeChannel?.unsubscribe();
+    super.dispose();
   }
 
   @override
@@ -119,12 +254,12 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
         SliverAppBar(
           expandedHeight: 200,
           pinned: true,
-          backgroundColor: _blue,
+          backgroundColor: _deepGreen,
           foregroundColor: Colors.white,
           flexibleSpace: FlexibleSpaceBar(
             background: act.imageUrl != null
                 ? Image.network(act.imageUrl!, fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => _gradientAppBarBg())
+                    errorBuilder: (_, e, s) => _gradientAppBarBg())
                 : _gradientAppBarBg(),
           ),
           title: Text(act.title,
@@ -149,7 +284,16 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
               children: [
                 // Status row
                 _StatusRow(activity: act),
-                const SizedBox(height: 20),
+                const SizedBox(height: 16),
+
+                // ── Priority banner (only during priority_pending) ──────────
+                if (act.isPriorityPending) ...[  
+                  if (isOrganizer)
+                    _buildCreatorPriorityBanner(act)
+                  else
+                    _buildWaitingForCreatorBanner(act),
+                  const SizedBox(height: 16),
+                ],
 
                 // Info cards
                 _InfoGrid(activity: act),
@@ -187,7 +331,7 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
                           width: 16,
                           height: 16,
                           child: CircularProgressIndicator(
-                              strokeWidth: 2, color: _blue)),
+                              strokeWidth: 2, color: Color(0xFF2E7D32))),
                   ],
                 ),
                 const SizedBox(height: 8),
@@ -197,13 +341,187 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
                 ),
                 const SizedBox(height: 32),
 
-                // Join / Leave button (only for non-organizers)
-                if (!isOrganizer) _joinButton(act),
+                // Join / Leave button (only for non-organizers, not during priority_pending)
+                if (!isOrganizer && !act.isPriorityPending) _joinButton(act),
               ],
             ),
           ),
         ),
       ],
+    );
+  }
+
+  // ── Priority phase widgets ─────────────────────────────────────────────────
+
+  /// Banner shown to the event creator during the 1-minute priority window.
+  Widget _buildCreatorPriorityBanner(GroupActivity act) {
+    final mins = _countdownSeconds ~/ 60;
+    final secs = (_countdownSeconds % 60).toString().padLeft(2, '0');
+    final urgency = _countdownSeconds <= 15;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: urgency
+              ? [const Color(0xFFE65100), const Color(0xFFBF360C)]
+              : [const Color(0xFF2E7D32), const Color(0xFF1B5E20)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: (urgency ? const Color(0xFFE65100) : const Color(0xFF1B5E20))
+                .withValues(alpha: 0.35),
+            blurRadius: 14,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Row(children: [
+            const Icon(Icons.star_rounded, color: Colors.amber, size: 22),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'You have Priority Participation!',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          const Text(
+            'As the event creator, you get the first spot — confirm within the countdown.',
+            style: TextStyle(
+                color: Colors.white70, fontSize: 12.5, height: 1.4),
+          ),
+          const SizedBox(height: 14),
+
+          // Countdown
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.black26,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.timer_rounded,
+                    color: Colors.white70, size: 18),
+                const SizedBox(width: 8),
+                Text(
+                  'Time remaining: $mins:$secs',
+                  style: TextStyle(
+                    color: urgency ? Colors.amber : Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          // Buttons
+          if (_priorityActing)
+            const Center(
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                    color: Colors.white, strokeWidth: 2.5),
+              ),
+            )
+          else
+            Row(children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _acceptPriority,
+                  icon: const Icon(Icons.check_circle_rounded, size: 18),
+                  label: const Text('Confirm Participation',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w700, fontSize: 13)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF1B5E20),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                onPressed: _declinePriority,
+                icon: const Icon(Icons.cancel_outlined, size: 16),
+                label: const Text('Skip',
+                    style: TextStyle(fontSize: 13)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.white70,
+                  side: const BorderSide(color: Colors.white30),
+                  padding: const EdgeInsets.symmetric(
+                      vertical: 12, horizontal: 16),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+            ]),
+        ],
+      ),
+    );
+  }
+
+  /// Banner shown to OTHER users while the creator has priority.
+  Widget _buildWaitingForCreatorBanner(GroupActivity act) {
+    final deadline = act.priorityDeadline;
+    final rem = deadline != null
+        ? deadline.difference(DateTime.now()).inSeconds.clamp(0, 60)
+        : 0;
+    final mins = rem ~/ 60;
+    final secs = (rem % 60).toString().padLeft(2, '0');
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFFFCC02).withValues(alpha: 0.6)),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Icon(Icons.hourglass_top_rounded,
+            color: Color(0xFFF57F17), size: 22),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text(
+              'Awaiting creator confirmation',
+              style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                  color: Color(0xFF5D4037)),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              rem > 0
+                  ? 'The creator has $mins:$secs to claim their spot.\nJoin will open immediately after.'
+                  : 'Join is opening soon…',
+              style: const TextStyle(
+                  fontSize: 12, color: Color(0xFF795548), height: 1.4),
+            ),
+          ]),
+        ),
+      ]),
     );
   }
 
@@ -219,7 +537,7 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
   Widget _gradientAppBarBg() => Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [Color(0xFF1565C0), Color(0xFF0D47A1)],
+            colors: [Color(0xFF388E3C), Color(0xFF1B5E20)],
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
           ),
@@ -239,7 +557,7 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
       child: ElevatedButton(
         onPressed: (_toggling || isFull || isNotOpen) ? null : _toggleJoin,
         style: ElevatedButton.styleFrom(
-          backgroundColor: act.isJoined ? Colors.red.shade700 : _blue,
+          backgroundColor: act.isJoined ? Colors.red.shade700 : _green,
           foregroundColor: Colors.white,
           disabledBackgroundColor: Colors.grey.shade300,
           disabledForegroundColor: Colors.grey.shade600,
@@ -287,8 +605,6 @@ class _StatusRow extends StatelessWidget {
   final GroupActivity activity;
   const _StatusRow({required this.activity});
 
-  static const Color _blue = Color(0xFF0D47A1);
-
   @override
   Widget build(BuildContext context) {
     final isOpen = activity.isOpen && !activity.isFull;
@@ -302,6 +618,10 @@ class _StatusRow extends StatelessWidget {
       chipColor = Colors.orange.shade700;
       chipLabel = 'Full';
       chipIcon = Icons.people_alt_rounded;
+    } else if (activity.status == 'waiting') {
+      chipColor = Colors.orange.shade600;
+      chipLabel = 'Pending Approval';
+      chipIcon = Icons.hourglass_top_rounded;
     } else if (isOpen) {
       chipColor = const Color(0xFF2E7D32);
       chipLabel = 'Open';
@@ -343,18 +663,18 @@ class _StatusRow extends StatelessWidget {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: BoxDecoration(
-            color: _blue.withValues(alpha: 0.1),
+            color: const Color(0xFF2E7D32).withValues(alpha: 0.1),
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: _blue.withValues(alpha: 0.3)),
+            border: Border.all(color: const Color(0xFF2E7D32).withValues(alpha: 0.3)),
           ),
           child: const Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.groups_rounded, color: _blue, size: 14),
+              Icon(Icons.groups_rounded, color: Color(0xFF2E7D32), size: 14),
               SizedBox(width: 5),
               Text('Group Event',
                   style: TextStyle(
-                    color: _blue,
+                    color: Color(0xFF2E7D32),
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
                   )),
@@ -371,8 +691,6 @@ class _StatusRow extends StatelessWidget {
 class _InfoGrid extends StatelessWidget {
   final GroupActivity activity;
   const _InfoGrid({required this.activity});
-
-  static const Color _blue = Color(0xFF0D47A1);
 
   @override
   Widget build(BuildContext context) {
@@ -435,8 +753,8 @@ class _InfoTile extends StatelessWidget {
   final _InfoItem item;
   const _InfoTile({required this.item});
 
-  static const Color _blue = Color(0xFF0D47A1);
-  static const Color _lightBlue = Color(0xFFE3F2FD);
+  static const Color _green = Color(0xFF2E7D32);
+  static const Color _lightGreen = Color(0xFFE8F5E9);
 
   @override
   Widget build(BuildContext context) {
@@ -445,7 +763,7 @@ class _InfoTile extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _blue.withValues(alpha: 0.12)),
+        border: Border.all(color: _green.withValues(alpha: 0.12)),
       ),
       child: Row(
         children: [
@@ -453,10 +771,10 @@ class _InfoTile extends StatelessWidget {
             width: 36,
             height: 36,
             decoration: BoxDecoration(
-              color: _lightBlue,
+              color: _lightGreen,
               borderRadius: BorderRadius.circular(8),
             ),
-            child: Icon(item.icon, color: _blue, size: 18),
+            child: Icon(item.icon, color: _green, size: 18),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -491,7 +809,7 @@ class _OrganizerTile extends StatelessWidget {
 
   const _OrganizerTile({required this.name, required this.isMe});
 
-  static const Color _blue = Color(0xFF0D47A1);
+  static const Color _green = Color(0xFF2E7D32);
 
   @override
   Widget build(BuildContext context) {
@@ -500,17 +818,17 @@ class _OrganizerTile extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _blue.withValues(alpha: 0.12)),
+        border: Border.all(color: _green.withValues(alpha: 0.12)),
       ),
       child: Row(
         children: [
           CircleAvatar(
             radius: 20,
-            backgroundColor: _blue.withValues(alpha: 0.15),
+            backgroundColor: _green.withValues(alpha: 0.15),
             child: Text(
               name.isNotEmpty ? name[0].toUpperCase() : '?',
               style: const TextStyle(
-                  color: _blue, fontWeight: FontWeight.bold, fontSize: 16),
+                  color: _green, fontWeight: FontWeight.bold, fontSize: 16),
             ),
           ),
           const SizedBox(width: 12),
@@ -526,13 +844,13 @@ class _OrganizerTile extends StatelessWidget {
               padding:
                   const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
-                color: _blue.withValues(alpha: 0.1),
+                color: _green.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(20),
               ),
               child: const Text('You',
                   style: TextStyle(
                       fontSize: 11,
-                      color: _blue,
+                      color: _green,
                       fontWeight: FontWeight.bold)),
             ),
         ],
@@ -552,7 +870,7 @@ class _ParticipantsList extends StatelessWidget {
     required this.maxParticipants,
   });
 
-  static const Color _blue = Color(0xFF0D47A1);
+  static const Color _green = Color(0xFF2E7D32);
 
   @override
   Widget build(BuildContext context) {
@@ -562,7 +880,7 @@ class _ParticipantsList extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: _blue.withValues(alpha: 0.12)),
+          border: Border.all(color: _green.withValues(alpha: 0.12)),
         ),
         child: Center(
           child: Column(
@@ -586,7 +904,7 @@ class _ParticipantsList extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _blue.withValues(alpha: 0.12)),
+        border: Border.all(color: _green.withValues(alpha: 0.12)),
       ),
       child: Column(
         children: participants
@@ -608,7 +926,7 @@ class _ParticipantTile extends StatelessWidget {
 
   const _ParticipantTile({required this.participant, required this.isLast});
 
-  static const Color _blue = Color(0xFF0D47A1);
+  static const Color _green = Color(0xFF2E7D32);
 
   @override
   Widget build(BuildContext context) {
@@ -625,10 +943,10 @@ class _ParticipantTile extends StatelessWidget {
             children: [
               CircleAvatar(
                 radius: 18,
-                backgroundColor: _blue.withValues(alpha: 0.12),
+                backgroundColor: _green.withValues(alpha: 0.12),
                 child: Text(initial,
                     style: const TextStyle(
-                        color: _blue,
+                        color: _green,
                         fontWeight: FontWeight.bold,
                         fontSize: 14)),
               ),
@@ -656,13 +974,13 @@ class _ParticipantTile extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: _blue.withValues(alpha: 0.1),
+                    color: _green.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: const Text('You',
                       style: TextStyle(
                           fontSize: 10,
-                          color: _blue,
+                          color: _green,
                           fontWeight: FontWeight.bold)),
                 ),
             ],
@@ -694,7 +1012,7 @@ class _LoadingView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => const Center(
-        child: CircularProgressIndicator(color: Color(0xFF0D47A1)),
+        child: CircularProgressIndicator(color: Color(0xFF2E7D32)),
       );
 }
 

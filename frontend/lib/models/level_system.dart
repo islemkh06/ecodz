@@ -44,6 +44,14 @@ class LevelSystem {
     return ((xp - lower) / (upper - lower)).clamp(0.0, 1.0);
   }
 
+  /// Returns the asset path for the avatar image corresponding to [level].
+  /// Levels 1-2 map to level1/level2; level 3+ maps to level3.
+  static String getLevelImage(int level) {
+    if (level <= 1) return 'assets/level1.png';
+    if (level == 2) return 'assets/level2.png';
+    return 'assets/level3.png';
+  }
+
   /// Human-readable title for a level.
   static String levelTitle(int level) => switch (level) {
         1 => 'Seedling',

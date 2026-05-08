@@ -7,7 +7,6 @@ import 'group_activity_create_page.dart';
 import 'group_activity_detail_page.dart';
 import 'profile.dart';
 import 'search.dart';
-import '../widgets/create_activity_modal.dart';
 import '../widgets/activity_type_selection_modal.dart';
 import '../widgets/global_fab.dart';
 import '../services/user_service.dart';
@@ -180,23 +179,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _openCreateModal() async {
-    final choice = await showActivityTypeSelectionModal(context);
-    if (!mounted || choice == null) return;
-
-    if (choice == ActivityTypeChoice.single) {
-      // Existing single-activity flow — unchanged
-      showDialog(
-        context: context,
-        builder: (_) => CreateActivityModal(onActivityCreated: _loadActivities),
-      );
-    } else {
-      // New group activity flow
-      await Navigator.of(context).push<bool>(
-        MaterialPageRoute(
-          builder: (_) => GroupActivityCreatePage(onCreated: _loadActivities),
-        ),
-      );
-    }
+    await openCreateActivitySheet(context, onCreated: () {
+      _loadActivities();
+      _loadGroupActivities();
+    });
   }
 
   String get _searchQuery => _searchController.text.trim().toLowerCase();
@@ -428,7 +414,14 @@ class _HomePageState extends State<HomePage> {
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(20),
-              child: Image.asset('assets/level1.png', fit: BoxFit.cover),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 400),
+                child: Image.asset(
+                  LevelSystem.getLevelImage(_userService.profile?.level ?? 1),
+                  key: ValueKey(_userService.profile?.level ?? 1),
+                  fit: BoxFit.cover,
+                ),
+              ),
             ),
           ),
           const SizedBox(width: 14),
