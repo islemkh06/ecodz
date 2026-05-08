@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../widgets/create_activity_modal.dart';
+import '../widgets/global_fab.dart';
 import 'activity.dart';
 import 'event_detail_page.dart';
 import 'home.dart';
@@ -1862,35 +1863,7 @@ class _ActivityDetailPageState extends State<ActivityDetailPage>
   // BOTTOM NAVIGATION (same as other pages)
   // =========================================================
 
-  Widget _buildFab() {
-    return GestureDetector(
-      onTap: () => showDialog(
-        context: context,
-        builder: (_) => CreateActivityModal(onActivityCreated: () {}),
-      ),
-      child: Container(
-        width: 74,
-        height: 74,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const LinearGradient(
-            colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          border: Border.all(color: const Color(0xFFE8F7E7), width: 2),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x4427502E),
-              blurRadius: 20,
-              offset: Offset(0, 8),
-            ),
-          ],
-        ),
-        child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
-      ),
-    );
-  }
+  Widget _buildFab() => buildGlobalFab(context);
 
   Widget _buildBottomBar() {
     return BottomAppBar(

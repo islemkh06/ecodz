@@ -7,6 +7,7 @@ import 'profile.dart';
 import 'search.dart';
 import 'work_completion_page.dart';
 import '../widgets/create_activity_modal.dart';
+import '../widgets/global_fab.dart';
 import '../services/user_service.dart';
 
 // ─── Data classes ─────────────────────────────────────────────────────────────
@@ -2222,38 +2223,13 @@ class _ActivityPageState extends State<ActivityPage>
   // ── Bottom navigation ────────────────────────────────────────────────────────
 
   Widget _buildFab() {
-    return GestureDetector(
-      onTap: () => showDialog(
-        context: context,
-        builder: (_) => CreateActivityModal(
-          onActivityCreated: () {
-            setState(() {
-              _availableLoaded = false;
-              _priorityLoaded = false;
-            });
-            _loadApprovalFeed();
-          },
-        ),
-      ),
-      child: Container(
-        width: 74,
-        height: 74,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const LinearGradient(
-            colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          border: Border.all(color: const Color(0xFFE8F7E7), width: 2),
-          boxShadow: const [
-            BoxShadow(
-                color: Color(0x4427502E), blurRadius: 20, offset: Offset(0, 8))
-          ],
-        ),
-        child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
-      ),
-    );
+    return buildGlobalFab(context, onCreated: () {
+      setState(() {
+        _availableLoaded = false;
+        _priorityLoaded = false;
+      });
+      _loadApprovalFeed();
+    });
   }
 
   Widget _buildBottomBar() {

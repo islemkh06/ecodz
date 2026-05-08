@@ -3,10 +3,15 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'activity.dart';
 import 'activity_detail.dart';
+import 'group_activity_create_page.dart';
+import 'group_activity_detail_page.dart';
 import 'profile.dart';
 import 'search.dart';
 import '../widgets/create_activity_modal.dart';
+import '../widgets/activity_type_selection_modal.dart';
+import '../widgets/global_fab.dart';
 import '../services/user_service.dart';
+import '../services/group_activity_service.dart';
 import '../models/level_system.dart';
 
 class HomePage extends StatefulWidget {
@@ -26,6 +31,10 @@ class _HomePageState extends State<HomePage> {
 
   List<Map<String, String>> _activities = [];
   bool _loadingActivities = false;
+
+  // Group activities
+  List<GroupActivity> _groupActivities = [];
+  bool _loadingGroupActivities = false;
 
   // Categories loaded from type_activite table
   List<Map<String, dynamic>> _categories = [];
@@ -68,6 +77,7 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _loadActivities();
     _loadCategories();
+    _loadGroupActivities();
     _userService.addListener(_onProfileChanged);
     _userService.fetch();
   }
@@ -97,9 +107,13 @@ class _HomePageState extends State<HomePage> {
           }
         }
         final preuveList = row['preuve'] as List? ?? [];
-        final imageUrl = preuveList.isNotEmpty
+        String imageUrl = preuveList.isNotEmpty
             ? (preuveList.first['url'] as String? ?? '')
             : '';
+        // For group activities use event_image_url if no preuve
+        if (imageUrl.isEmpty) {
+          imageUrl = row['event_image_url'] as String? ?? '';
+        }
         loaded.add({
           'id': (row['id_act'] as int? ?? 0).toString(),
           'title': row['titre'] as String? ?? '',
@@ -108,6 +122,7 @@ class _HomePageState extends State<HomePage> {
           'exp': xp != null ? '+$xp XP' : '',
           'id_type_act': (row['id_type_act'] as int? ?? 0).toString(),
           'image_url': imageUrl,
+          'activity_mode': row['activity_mode'] as String? ?? 'single',
         });
       }
       if (mounted) setState(() => _activities = loaded);
@@ -151,11 +166,37 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _openCreateModal() {
-    showDialog(
-      context: context,
-      builder: (_) => CreateActivityModal(onActivityCreated: _loadActivities),
-    );
+  Future<void> _loadGroupActivities() async {
+    setState(() => _loadingGroupActivities = true);
+    try {
+      final data =
+          await GroupActivityService.instance.fetchUpcomingGroupActivities();
+      if (mounted) setState(() => _groupActivities = data);
+    } catch (_) {
+      // non-critical — keep existing list
+    } finally {
+      if (mounted) setState(() => _loadingGroupActivities = false);
+    }
+  }
+
+  Future<void> _openCreateModal() async {
+    final choice = await showActivityTypeSelectionModal(context);
+    if (!mounted || choice == null) return;
+
+    if (choice == ActivityTypeChoice.single) {
+      // Existing single-activity flow — unchanged
+      showDialog(
+        context: context,
+        builder: (_) => CreateActivityModal(onActivityCreated: _loadActivities),
+      );
+    } else {
+      // New group activity flow
+      await Navigator.of(context).push<bool>(
+        MaterialPageRoute(
+          builder: (_) => GroupActivityCreatePage(onCreated: _loadActivities),
+        ),
+      );
+    }
   }
 
   String get _searchQuery => _searchController.text.trim().toLowerCase();
@@ -217,6 +258,7 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 16),
               _buildSearch(),
               _buildCategories(),
+              _buildGroupActivities(),
               _buildActivities(),
             ],
           ),
@@ -226,30 +268,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildFab() {
-    return GestureDetector(
-      onTap: _openCreateModal,
-      child: Container(
-        width: 74,
-        height: 74,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: const LinearGradient(
-          colors: [Color(0xFF4CAF50), Color(0xFF1B5E20)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        border: Border.all(color: const Color(0xFFE8F7E7), width: 2),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x4427502E),
-            blurRadius: 20,
-            offset: Offset(0, 8),
-          ),
-        ],
-      ),
-        child: const Icon(Icons.add_rounded, color: Colors.white, size: 34),
-      ),
-    );
+    return buildGlobalFab(context, onCreated: () {
+      _loadActivities();
+      _loadGroupActivities();
+    });
   }
 
   Widget _buildBottomBar() {
@@ -723,6 +745,75 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ── Group Activities horizontal scroll ─────────────────────────────────────
+  Widget _buildGroupActivities() {
+    if (!_loadingGroupActivities && _groupActivities.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.groups_rounded, color: Color(0xFF0D47A1), size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'Group Events',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              Text(
+                '${_groupActivities.length} open',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF0D47A1),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_loadingGroupActivities)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            child: Center(
+              child: CircularProgressIndicator(color: Color(0xFF0D47A1)),
+            ),
+          )
+        else
+          SizedBox(
+            height: 170,
+            child: ListView.builder(
+              physics: const BouncingScrollPhysics(),
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.only(right: 16),
+              itemCount: _groupActivities.length,
+              itemBuilder: (_, i) => _GroupEventCard(
+                activity: _groupActivities[i],
+                onTap: () async {
+                  await Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => GroupActivityDetailPage(
+                        activityId: _groupActivities[i].id,
+                      ),
+                    ),
+                  );
+                  _loadGroupActivities();
+                },
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   // ✅ ACTIVITIES WITH IMAGE + TEXT OVERLAY
   Widget _buildActivities() {
     final filteredActivities = _filteredActivities;
@@ -770,14 +861,16 @@ class _HomePageState extends State<HomePage> {
         else
           Column(
             children: filteredActivities.map((act) {
+              final isGroup = act['activity_mode'] == 'group';
+              final actId = int.tryParse(act['id'] ?? '0');
               return GestureDetector(
                 onTap: () => Navigator.push(
                   context,
                   PageRouteBuilder(
                     transitionDuration: const Duration(milliseconds: 350),
-                    pageBuilder: (_, __, ___) => ActivityDetailPage(
-                      activityId: int.tryParse(act['id'] ?? '0'),
-                    ),
+                    pageBuilder: (_, __, ___) => isGroup
+                        ? GroupActivityDetailPage(activityId: actId ?? 0)
+                        : ActivityDetailPage(activityId: actId),
                     transitionsBuilder: (_, animation, __, child) {
                       final slide =
                           Tween<Offset>(
@@ -796,7 +889,9 @@ class _HomePageState extends State<HomePage> {
                     },
                   ),
                 ),
-                child: Container(
+                child: Stack(
+                  children: [
+                    Container(
                   height: 230,
                   width: double.infinity,
                   margin: const EdgeInsets.fromLTRB(16, 0, 16, 14),
@@ -881,10 +976,177 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                 ),
+                    if (isGroup)
+                      Positioned(
+                        top: 12,
+                        right: 28,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0D47A1),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.groups_rounded, color: Colors.white, size: 13),
+                              SizedBox(width: 4),
+                              Text('Group Event',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               );
             }).toList(),
           ),
       ],
     );
+  }
+}
+
+// ─── Group Event Card (used in horizontal scroll on home) ─────────────────────
+
+class _GroupEventCard extends StatelessWidget {
+  final GroupActivity activity;
+  final VoidCallback onTap;
+
+  const _GroupEventCard({required this.activity, required this.onTap});
+
+  static const Color _blue = Color(0xFF0D47A1);
+
+  @override
+  Widget build(BuildContext context) {
+    final isFull = activity.isFull;
+
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 220,
+        margin: const EdgeInsets.only(left: 16),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: isFull
+                ? [const Color(0xFF546E7A), const Color(0xFF37474F)]
+                : [const Color(0xFF1565C0), _blue],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: _blue.withValues(alpha: 0.3),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Top row: icon + status badge
+              Row(
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.groups_rounded,
+                        color: Colors.white, size: 20),
+                  ),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: isFull
+                          ? Colors.orange.withValues(alpha: 0.85)
+                          : Colors.white.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      isFull ? 'Full' : 'Open',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+
+              // Title
+              Text(
+                activity.title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const Spacer(),
+
+              // Participants
+              Row(
+                children: [
+                  const Icon(Icons.people_rounded,
+                      color: Colors.white70, size: 13),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${activity.currentParticipants}/${activity.maxParticipants}',
+                    style: const TextStyle(
+                        color: Colors.white70, fontSize: 12),
+                  ),
+                ],
+              ),
+
+              // Date
+              if (activity.eventDate != null) ...[
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.event_rounded,
+                        color: Colors.white70, size: 13),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        _fmtShort(activity.eventDate!),
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 11),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static String _fmtShort(DateTime dt) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    return '${dt.day} ${months[dt.month - 1]}  ·  $h:$m';
   }
 }
