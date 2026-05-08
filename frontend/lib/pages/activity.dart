@@ -71,6 +71,8 @@ class _ApprovalItem {
 class _ValidationItem {
   final int id;
   final String workerId;
+  final String creatorId;
+  final String activityMode;
   final String title;
   final String description;
   final String location;
@@ -89,6 +91,8 @@ class _ValidationItem {
   const _ValidationItem({
     required this.id,
     required this.workerId,
+    this.creatorId = '',
+    this.activityMode = 'single',
     required this.title,
     required this.description,
     required this.location,
@@ -106,6 +110,8 @@ class _ValidationItem {
   int get totalVotes => approveCount + rejectCount;
   bool get hasVoted => myVote != null;
   bool isWorker(String? uid) => uid != null && workerId == uid;
+  bool isCreator(String? uid) => uid != null && creatorId == uid;
+  bool get isGroupEvent => activityMode == 'group';
 }
 
 class _WorkItem {
@@ -119,6 +125,8 @@ class _WorkItem {
   final String categoryName;
   final String status;
   final DateTime? priorityDeadline;
+  final String activityMode;
+  final DateTime? eventDate;
 
   const _WorkItem({
     required this.id,
@@ -131,12 +139,22 @@ class _WorkItem {
     required this.categoryName,
     required this.status,
     this.priorityDeadline,
+    this.activityMode = 'single',
+    this.eventDate,
   });
 
   Duration get timeLeft =>
       priorityDeadline != null
           ? priorityDeadline!.difference(DateTime.now())
           : Duration.zero;
+
+  Duration get timeUntilEvent =>
+      eventDate != null
+          ? eventDate!.difference(DateTime.now())
+          : Duration.zero;
+
+  bool get eventHasStarted =>
+      eventDate != null && DateTime.now().isAfter(eventDate!);
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -196,6 +214,10 @@ class _ActivityPageState extends State<ActivityPage>
   bool _loadingDone = false;
   bool _doneLoaded = false;
 
+  List<_WorkItem> _eventItems = [];
+  bool _loadingEvents = false;
+  bool _eventsLoaded = false;
+
   String? get _myId => Supabase.instance.client.auth.currentUser?.id;
 
   @override
@@ -203,7 +225,7 @@ class _ActivityPageState extends State<ActivityPage>
     super.initState();
     _communityTabController = TabController(length: 3, vsync: this);
     _communityTabController.addListener(_onCommunityTabChange);
-    _workTabController = TabController(length: 4, vsync: this);
+    _workTabController = TabController(length: 5, vsync: this);
     _workTabController.addListener(_onWorkTabChange);
     _loadApprovalFeed();
     Supabase.instance.client
@@ -223,6 +245,7 @@ class _ActivityPageState extends State<ActivityPage>
     if (i == 1 && !_availableLoaded && !_loadingAvailable) _loadAvailable();
     if (i == 2 && !_activeLoaded && !_loadingActive) _loadActive();
     if (i == 3 && !_doneLoaded && !_loadingDone) _loadDone();
+    if (i == 4 && !_eventsLoaded && !_loadingEvents) _loadEvents();
   }
 
   @override
@@ -330,8 +353,9 @@ class _ActivityPageState extends State<ActivityPage>
       final data = await Supabase.instance.client
           .from('activite')
           .select(
-            'id_act, assigned_worker_id, titre, description, localisation, '
-            'datecreation, xpfinal, type_activite(nom), preuve(url)',
+            'id_act, assigned_worker_id, id_utilisateur, activity_mode, '
+            'titre, description, localisation, '
+            'datecreation, xpfinal, type_activite(nom), preuve(url, type)',
           )
           .eq('status', 'pending_validation')
           .order('completed_at', ascending: false);
@@ -390,6 +414,8 @@ class _ActivityPageState extends State<ActivityPage>
         return _ValidationItem(
           id: id,
           workerId: act['assigned_worker_id'] as String? ?? '',
+          creatorId: act['id_utilisateur'] as String? ?? '',
+          activityMode: act['activity_mode'] as String? ?? 'single',
           title: act['titre'] as String? ?? '',
           description: act['description'] as String? ?? '',
           location: act['localisation'] as String? ?? '',
@@ -506,10 +532,11 @@ class _ActivityPageState extends State<ActivityPage>
           .from('activite')
           .select(
             'id_act, id_utilisateur, titre, localisation, datecreation, '
-            'xpfinal, status, type_activite(nom), preuve(url)',
+            'xpfinal, status, activity_mode, type_activite(nom), preuve(url)',
           )
           .inFilter('status', ['open', 'approved'])
           .neq('id_utilisateur', uid)
+          .eq('activity_mode', 'single')
           .order('datecreation', ascending: false);
 
       final list = (data as List).cast<Map<String, dynamic>>().map(_parseWork).toList();
@@ -591,6 +618,52 @@ class _ActivityPageState extends State<ActivityPage>
         setState(() {
           _loadingDone = false;
           _doneLoaded = true;
+        });
+      }
+    }
+  }
+
+  // ── Events Tab loader ────────────────────────────────────────────────────────
+
+  Future<void> _loadEvents() async {
+    final uid = _myId;
+    if (uid == null) return;
+    setState(() => _loadingEvents = true);
+
+    // Fire server-side lifecycle advancement (non-blocking)
+    Supabase.instance.client.rpc('lock_due_group_events').catchError((_) {});
+    Supabase.instance.client.rpc('start_due_group_events').catchError((_) {});
+
+    try {
+      final data = await Supabase.instance.client
+          .from('activite')
+          .select(
+            'id_act, id_utilisateur, titre, localisation, datecreation, '
+            'xpfinal, status, activity_mode, event_date, '
+            'max_participants, current_participants_count, '
+            'type_activite(nom), preuve(url)',
+          )
+          .eq('activity_mode', 'group')
+          .or(
+            'status.in.(open,approved,locked,in_progress),'
+            'and(status.eq.priority_pending,id_utilisateur.eq.$uid)',
+          )
+          .order('event_date', ascending: true)
+          .limit(50);
+
+      final list = (data as List).cast<Map<String, dynamic>>().map(_parseWork).toList();
+      if (mounted) {
+        setState(() {
+          _eventItems = list;
+          _loadingEvents = false;
+          _eventsLoaded = true;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _loadingEvents = false;
+          _eventsLoaded = true;
         });
       }
     }
@@ -815,6 +888,7 @@ class _ActivityPageState extends State<ActivityPage>
     final pl = act['preuve'] as List? ?? [];
     final td = act['type_activite'] as Map<String, dynamic>?;
     final deadlineRaw = act['priority_deadline'] as String?;
+    final eventDateRaw = act['event_date'] as String?;
     return _WorkItem(
       id: act['id_act'] as int,
       creatorId: act['id_utilisateur'] as String? ?? '',
@@ -827,6 +901,10 @@ class _ActivityPageState extends State<ActivityPage>
       status: act['status'] as String? ?? '',
       priorityDeadline:
           deadlineRaw != null ? DateTime.tryParse(deadlineRaw) : null,
+      activityMode: act['activity_mode'] as String? ?? 'single',
+      eventDate: eventDateRaw != null
+          ? DateTime.tryParse(eventDateRaw)?.toLocal()
+          : null,
     );
   }
 
@@ -1207,9 +1285,24 @@ class _ActivityPageState extends State<ActivityPage>
 
   Widget _buildValidationCard(_ValidationItem item) {
     final isWorker = item.isWorker(_myId);
+    final isCreator = item.isCreator(_myId);
+    final cannotVote = isWorker || (item.isGroupEvent && isCreator);
     final isValidating = _validating.contains(item.id);
 
-    return _card(
+    return GestureDetector(
+      onTap: item.isGroupEvent
+          ? () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) =>
+                      GroupActivityDetailPage(activityId: item.id),
+                ),
+              ).then((_) {
+                _validationLoaded = false;
+                _loadValidation();
+              })
+          : null,
+      child: _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1226,21 +1319,38 @@ class _ActivityPageState extends State<ActivityPage>
               children: [
                 Row(children: [
                   Expanded(child: Text(item.title, style: _titleStyle)),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1565C0),
-                      borderRadius: BorderRadius.circular(99),
+                  if (item.isGroupEvent)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2E7D32),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                      child: const Text(
+                        'Group Event',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700),
+                      ),
+                    )
+                  else
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1565C0),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                      child: const Text(
+                        'Needs Validation',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700),
+                      ),
                     ),
-                    child: const Text(
-                      'Needs Validation',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700),
-                    ),
-                  ),
                 ]),
                 if (item.description.isNotEmpty) ...[
                   const SizedBox(height: 6),
@@ -1266,10 +1376,14 @@ class _ActivityPageState extends State<ActivityPage>
                 const SizedBox(height: 14),
                 _voteProgress(item.approveCount, item.rejectCount, 2),
                 const SizedBox(height: 14),
-                if (isWorker)
+                if (cannotVote)
                   _infoBanner(
-                    Icons.work_rounded,
-                    'This is your submitted work.',
+                    isWorker
+                        ? Icons.work_rounded
+                        : Icons.groups_rounded,
+                    isWorker
+                        ? 'This is your submitted work.'
+                        : 'You organised this event \u2014 you cannot vote on it.',
                     _deepGreen,
                   )
                 else if (item.hasVoted)
@@ -1316,6 +1430,7 @@ class _ActivityPageState extends State<ActivityPage>
           ),
         ],
       ),
+    ),
     );
   }
 
@@ -1480,7 +1595,7 @@ class _ActivityPageState extends State<ActivityPage>
       children: [
         _buildTabBar(
           controller: _workTabController,
-          tabs: const ['Priority', 'Available', 'Active', 'Done'],
+          tabs: const ['Priority', 'Available', 'Active', 'Done', 'Events'],
         ),
         Expanded(
           child: TabBarView(
@@ -1490,6 +1605,7 @@ class _ActivityPageState extends State<ActivityPage>
               _buildAvailableTab(),
               _buildActiveTab(),
               _buildDoneTab(),
+              _buildEventsTab(),
             ],
           ),
         ),
@@ -1773,6 +1889,230 @@ class _ActivityPageState extends State<ActivityPage>
     );
   }
 
+  // ── Events Tab ──────────────────────────────────────────────────────────────
+
+  Widget _buildEventsTab() {
+    return RefreshIndicator(
+      color: _green,
+      onRefresh: () async {
+        _eventsLoaded = false;
+        await _loadEvents();
+      },
+      child: _loadingEvents
+          ? const Center(child: CircularProgressIndicator(color: _green))
+          : _eventItems.isEmpty
+              ? _emptyView(
+                  Icons.event_busy_outlined,
+                  'No upcoming group events.',
+                  'Create a group event or check back soon!',
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 120),
+                  itemCount: _eventItems.length,
+                  itemBuilder: (_, i) {
+                    final item = _eventItems[i];
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: GestureDetector(
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                GroupActivityDetailPage(activityId: item.id),
+                          ),
+                        ).then((_) {
+                          _eventsLoaded = false;
+                          _loadEvents();
+                        }),
+                        child: _buildEventCard(item),
+                      ),
+                    );
+                  },
+                ),
+    );
+  }
+
+  Widget _buildEventCard(_WorkItem item) {
+    final eventDate = item.eventDate;
+    final timeLeft = item.timeUntilEvent;
+    final hasStarted = item.eventHasStarted;
+
+    Color timeColor;
+    String timeLabel;
+    if (hasStarted || item.status == 'in_progress') {
+      timeLabel = 'In Progress';
+      timeColor = const Color(0xFF1565C0);
+    } else if (item.status == 'locked') {
+      timeLabel = 'Locked – starts soon';
+      timeColor = Colors.red.shade700;
+    } else if (timeLeft.inMinutes <= 5) {
+      timeLabel = 'Locking in ${timeLeft.inMinutes}m';
+      timeColor = Colors.red.shade700;
+    } else if (timeLeft.inHours < 1) {
+      timeLabel = '${timeLeft.inMinutes}m remaining';
+      timeColor = Colors.orange.shade700;
+    } else if (timeLeft.inDays > 0) {
+      timeLabel =
+          '${timeLeft.inDays}d ${timeLeft.inHours.remainder(24)}h remaining';
+      timeColor = _green;
+    } else {
+      timeLabel =
+          '${timeLeft.inHours}h ${timeLeft.inMinutes.remainder(60)}m remaining';
+      timeColor = _green;
+    }
+
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    final dateLine = eventDate != null
+        ? '${eventDate.day} ${months[eventDate.month - 1]}  '
+            '${eventDate.hour.toString().padLeft(2, '0')}:'
+            '${eventDate.minute.toString().padLeft(2, '0')}'
+        : null;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: const [
+          BoxShadow(
+              color: Color(0x141B5E20), blurRadius: 14, offset: Offset(0, 5)),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Image strip with overlays
+            Stack(
+              children: [
+                SizedBox(
+                  height: 130,
+                  width: double.infinity,
+                  child: item.imageUrl.startsWith('http')
+                      ? Image.network(
+                          item.imageUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => _eventGradient(),
+                        )
+                      : _eventGradient(),
+                ),
+                // Group event badge
+                Positioned(
+                  top: 10,
+                  left: 10,
+                  child: _badge('Group Event', _deepGreen, Colors.white),
+                ),
+                // Status badge
+                Positioned(
+                  top: 10,
+                  right: 10,
+                  child: _badge(
+                    _statusLabel(item.status),
+                    _statusColor(item.status),
+                    Colors.white,
+                  ),
+                ),
+                // Time remaining bar
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                    color: const Color(0xBB000000),
+                    child: Row(children: [
+                      Icon(
+                        hasStarted || item.status == 'in_progress'
+                            ? Icons.play_circle_rounded
+                            : Icons.schedule_rounded,
+                        color: timeColor,
+                        size: 13,
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        timeLabel,
+                        style: TextStyle(
+                          color: timeColor,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (dateLine != null)
+                        Text(
+                          dateLine,
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 11),
+                        ),
+                    ]),
+                  ),
+                ),
+              ],
+            ),
+
+            // Details
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(item.title,
+                      style: _titleStyle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis),
+                  if (item.categoryName.isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      item.categoryName,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF4A7D4E),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 4,
+                    children: [
+                      if (item.location.isNotEmpty)
+                        _chip(Icons.location_on_rounded, item.location),
+                      if (item.xpLabel.isNotEmpty)
+                        _chip(Icons.bolt_rounded, item.xpLabel),
+                      _chip(
+                        Icons.arrow_forward_ios_rounded,
+                        'Tap to view & join',
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _eventGradient() => Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF388E3C), Color(0xFF1B5E20)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: const Center(
+          child:
+              Icon(Icons.groups_rounded, size: 52, color: Colors.white24),
+        ),
+      );
+
   // ─── Shared UI components ───────────────────────────────────────────────────
 
   Widget _buildWorkCard(
@@ -1872,6 +2212,7 @@ class _ActivityPageState extends State<ActivityPage>
         'rejected' => _rejectColor,
         'in_progress' => const Color(0xFF1565C0),
         'pending_validation' => const Color(0xFFF57F17),
+        'locked' => Colors.red.shade700,
         'open' || 'approved' => const Color(0xFF00897B),
         'priority_pending' => const Color(0xFF7B1FA2),
         _ => Colors.grey,
@@ -1882,6 +2223,7 @@ class _ActivityPageState extends State<ActivityPage>
         'rejected' => 'Rejected',
         'in_progress' => 'In Progress',
         'pending_validation' => 'Under Review',
+        'locked' => 'Locked',
         'open' || 'approved' => 'Open',
         'priority_pending' => 'Priority',
         'waiting' => 'Pending Approval',

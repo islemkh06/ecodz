@@ -19,13 +19,15 @@ class GroupActivity {
   final double? longitude;
   final String organizerId;
   final String? organizerName;
-  final DateTime? eventDate;
+  final DateTime? eventDate;       // = event_start_at: when the event actually begins
+  final DateTime? lockedAt;        // set when status transitions to 'locked'
   final int maxParticipants;
   final int currentParticipants;
   final String status;
   final DateTime createdAt;
   final String? imageUrl;
   final String? categoryName;
+  final int xpFinal;               // XP reward shown on the card
 
   /// Set when the event is in the creator-priority phase
   final DateTime? priorityDeadline;
@@ -44,12 +46,14 @@ class GroupActivity {
     required this.organizerId,
     this.organizerName,
     this.eventDate,
+    this.lockedAt,
     required this.maxParticipants,
     required this.currentParticipants,
     required this.status,
     required this.createdAt,
     this.imageUrl,
     this.categoryName,
+    this.xpFinal = 0,
     this.priorityDeadline,
     this.creatorPriorityStatus,
     this.isJoined = false,
@@ -80,7 +84,10 @@ class GroupActivity {
       organizerId: m['id_utilisateur'] as String? ?? '',
       organizerName: organizerName,
       eventDate: m['event_date'] != null
-          ? DateTime.tryParse(m['event_date'] as String)
+          ? DateTime.tryParse(m['event_date'] as String)?.toLocal()
+          : null,
+      lockedAt: m['locked_at'] != null
+          ? DateTime.tryParse(m['locked_at'] as String)?.toLocal()
           : null,
       maxParticipants: m['max_participants'] as int? ?? 10,
       currentParticipants: m['current_participants_count'] as int? ?? 0,
@@ -90,6 +97,7 @@ class GroupActivity {
           : DateTime.now(),
       imageUrl: imageUrl,
       categoryName: categoryName,
+      xpFinal: (m['xpfinal'] as num?)?.toInt() ?? 0,
       priorityDeadline: m['priority_deadline'] != null
           ? DateTime.tryParse(m['priority_deadline'] as String)?.toLocal()
           : null,
@@ -97,11 +105,51 @@ class GroupActivity {
     );
   }
 
+  // ── Computed state helpers ────────────────────────────────────────────────
+
   bool get isFull => currentParticipants >= maxParticipants;
-  /// True only when the event is openly available to all users.
+
+  /// True only when the event is openly available for join/leave.
   bool get isOpen => status == 'open' || status == 'approved';
+
   /// True during the 1-minute creator priority window.
   bool get isPriorityPending => status == 'priority_pending';
+
+  /// True when the event is locked (5 min before start) - no join/leave.
+  bool get isLocked => status == 'locked';
+
+  /// True when the event is actively in progress.
+  bool get isInProgress => status == 'in_progress';
+
+  /// True when the event has completed and is awaiting validation votes.
+  bool get isPendingValidation => status == 'pending_validation';
+
+  /// True when the event is fully done.
+  bool get isCompleted => status == 'completed';
+
+  /// True when the event start time has passed (locally computed).
+  bool get hasStarted =>
+      eventDate != null && DateTime.now().isAfter(eventDate!);
+
+  /// True when we are within the 5-minute lock window (local check).
+  bool get isWithinLockWindow {
+    if (eventDate == null) return false;
+    final lockTime = eventDate!.subtract(const Duration(minutes: 5));
+    final now = DateTime.now();
+    return now.isAfter(lockTime) && now.isBefore(eventDate!);
+  }
+
+  /// Duration until the event starts (negative if already started).
+  Duration get timeUntilStart =>
+      eventDate != null ? eventDate!.difference(DateTime.now()) : Duration.zero;
+
+  /// Duration until the event locks (negative if already locked/started).
+  Duration get timeUntilLock {
+    if (eventDate == null) return Duration.zero;
+    final lockTime = eventDate!.subtract(const Duration(minutes: 5));
+    return lockTime.difference(DateTime.now());
+  }
+
   int get spotsLeft => maxParticipants - currentParticipants;
 }
 
@@ -150,6 +198,17 @@ class GroupActivityService {
 
   String get _uid =>
       _db.auth.currentUser?.id ?? (throw Exception('Not authenticated'));
+
+  // ── Select field list (shared by read methods) ────────────────────────────
+  static const _kGroupActivityFields =
+      'id_act, titre, description, localisation, latitude, longitude, '
+      'id_utilisateur, status, datecreation, event_image_url, xpfinal, '
+      'max_participants, current_participants_count, event_date, locked_at, '
+      'priority_deadline, creator_priority_status, '
+      'type_activite(nom), '
+      'creator:profiles!activite_id_utilisateur_fkey(full_name), '
+      'preuve(url), '
+      'activity_participants(user_id, status)';
 
   // ── Create ─────────────────────────────────────────────────────────────────
 
@@ -200,8 +259,8 @@ class GroupActivityService {
         })
         .select(
           'id_act, titre, description, localisation, latitude, longitude, '
-          'id_utilisateur, status, datecreation, event_image_url, '
-          'max_participants, current_participants_count, event_date, '
+          'id_utilisateur, status, datecreation, event_image_url, xpfinal, '
+          'max_participants, current_participants_count, event_date, locked_at, '
           'type_activite(nom), '
           'creator:profiles!activite_id_utilisateur_fkey(full_name), '
           'preuve(url)',
@@ -216,22 +275,20 @@ class GroupActivityService {
   Future<List<GroupActivity>> fetchUpcomingGroupActivities() async {
     final uid = _uid;
 
+    // Trigger server-side lock/start transitions before fetching
+    _db.rpc('lock_due_group_events').catchError((_) {});
+    _db.rpc('start_due_group_events').catchError((_) {});
+
     final rows = await _db
         .from('activite')
-        .select(
-          'id_act, titre, description, localisation, latitude, longitude, '
-          'id_utilisateur, status, datecreation, event_image_url, '
-          'max_participants, current_participants_count, event_date, '
-          'priority_deadline, creator_priority_status, '
-          'type_activite(nom), '
-          'creator:profiles!activite_id_utilisateur_fkey(full_name), '
-          'preuve(url), '
-          'activity_participants(user_id, status)',
-        )
+        .select(_kGroupActivityFields)
         .eq('activity_mode', 'group')
-        // Show open/approved events to everyone;
+        // Show open/approved/locked/in_progress events to everyone;
         // also show this user's own priority_pending events (their 1-min window)
-        .or('status.in.(open,approved),and(status.eq.priority_pending,id_utilisateur.eq.$uid)')
+        .or(
+          'status.in.(open,approved,locked,in_progress),'
+          'and(status.eq.priority_pending,id_utilisateur.eq.$uid)',
+        )
         .order('event_date', ascending: true)
         .limit(50);
 
@@ -248,18 +305,15 @@ class GroupActivityService {
   Future<GroupActivity> fetchGroupActivity(int activityId) async {
     final uid = _uid;
 
+    // Atomically advance this event's status if needed
+    await _db.rpc(
+      'refresh_group_event_status',
+      params: {'p_activity_id': activityId},
+    ).catchError((_) {});
+
     final row = await _db
         .from('activite')
-        .select(
-          'id_act, titre, description, localisation, latitude, longitude, '
-          'id_utilisateur, status, datecreation, event_image_url, '
-          'max_participants, current_participants_count, event_date, '
-          'priority_deadline, creator_priority_status, '
-          'type_activite(nom), '
-          'creator:profiles!activite_id_utilisateur_fkey(full_name), '
-          'preuve(url), '
-          'activity_participants(user_id, status)',
-        )
+        .select(_kGroupActivityFields)
         .eq('id_act', activityId)
         .eq('activity_mode', 'group')
         .single();
@@ -333,6 +387,41 @@ class GroupActivityService {
     }
   }
 
+  // ── Lifecycle: refresh status ─────────────────────────────────────────────
+
+  /// Asks the server to advance this event's status (open→locked→in_progress).
+  /// Returns the new status string, or null on error.
+  Future<String?> refreshEventStatus(int activityId) async {
+    try {
+      final result = await _db.rpc(
+        'refresh_group_event_status',
+        params: {'p_activity_id': activityId},
+      ) as Map<String, dynamic>;
+      return result['status'] as String?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ── Completion submission (group events) ──────────────────────────────────
+
+  /// Submits completion for a group event (any participant / organizer).
+  /// Returns null on success, or a human-readable error string.
+  Future<String?> submitGroupEventCompletion(int activityId) async {
+    try {
+      final result = await _db.rpc(
+        'submit_work_completion',
+        params: {'p_act_id': activityId, 'p_user_id': _uid},
+      ) as Map<String, dynamic>;
+      if (result['success'] == true) return null;
+      return _humanizeError(result['error'] as String? ?? 'unknown_error');
+    } on PostgrestException catch (e) {
+      return e.message;
+    } catch (e) {
+      return e.toString();
+    }
+  }
+
   // ── Join / Leave ───────────────────────────────────────────────────────────
 
   /// Returns null on success, or a human-readable error string.
@@ -373,15 +462,29 @@ class GroupActivityService {
   static String _humanizeError(String code) {
     switch (code) {
       case 'activity_not_found':
-        return 'Activity not found.';
+      case 'event_not_found':
+        return 'Event not found.';
       case 'not_a_group_activity':
-        return 'This is not a group activity.';
+        return 'This is not a group event.';
       case 'activity_not_open':
-        return 'This activity is no longer open.';
+        return 'This event is no longer open for joining.';
       case 'activity_full':
-        return 'This activity is already full.';
+        return 'This event is already full.';
       case 'already_joined':
-        return 'You have already joined this activity.';
+        return 'You have already joined this event.';
+      case 'event_locked':
+        return 'This event is locked — join/leave is disabled 5 minutes before the start.';
+      case 'event_started':
+        return 'The event has already started. You can no longer join or leave.';
+      case 'event_not_started':
+      case 'event_not_in_progress':
+        return 'The event has not started yet.';
+      case 'event_not_started_yet':
+        return 'Completion can only be submitted after the event has started.';
+      case 'not_a_participant':
+        return 'You must be a confirmed participant to submit completion.';
+      case 'no_completion_photos':
+        return 'Please upload at least one after-photo before submitting.';
       case 'creator_priority_active':
         return 'The event creator has a 1-minute priority window. Please try again shortly.';
       case 'priority_expired':

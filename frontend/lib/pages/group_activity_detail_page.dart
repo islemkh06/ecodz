@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/group_activity_service.dart';
+import 'work_completion_page.dart';
 
 class GroupActivityDetailPage extends StatefulWidget {
   final int activityId;
@@ -24,11 +25,15 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
   bool _loadingParticipants = false;
   bool _toggling = false;
   bool _priorityActing = false;
+  bool _submitActing = false;
   String? _error;
 
   // ── Priority countdown ──────────────────────────────────────────────────────
   Timer? _priorityTimer;
   int _countdownSeconds = 0;
+
+  // ── Lifecycle: lock countdown + status auto-refresh ──────────────────────
+  Timer? _lifecycleTimer;
 
   // ── Realtime subscription ───────────────────────────────────────────────────
   RealtimeChannel? _realtimeChannel;
@@ -40,6 +45,18 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
     super.initState();
     _load();
     _subscribeToActivity();
+    // Refresh lifecycle status every 30 seconds so lock/start transitions are caught
+    _lifecycleTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted && _activity != null) {
+        final act = _activity!;
+        // Only keep polling while the event can still transition
+        if (act.status == 'open' || act.status == 'approved' || act.status == 'locked') {
+          _load();
+        } else {
+          _lifecycleTimer?.cancel();
+        }
+      }
+    });
   }
 
   // ── Realtime subscription ───────────────────────────────────────────────────
@@ -228,6 +245,7 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
   @override
   void dispose() {
     _stopPriorityCountdown();
+    _lifecycleTimer?.cancel();
     _realtimeChannel?.unsubscribe();
     super.dispose();
   }
@@ -287,11 +305,35 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
                 const SizedBox(height: 16),
 
                 // ── Priority banner (only during priority_pending) ──────────
-                if (act.isPriorityPending) ...[  
+                if (act.isPriorityPending) ...[
                   if (isOrganizer)
                     _buildCreatorPriorityBanner(act)
                   else
                     _buildWaitingForCreatorBanner(act),
+                  const SizedBox(height: 16),
+                ],
+
+                // ── Lock countdown banner (5 min window before start) ───────
+                if (act.isWithinLockWindow || act.isLocked) ...[
+                  _buildLockBanner(act),
+                  const SizedBox(height: 16),
+                ],
+
+                // ── In-progress banner ──────────────────────────────────────
+                if (act.isInProgress) ...[
+                  _buildInProgressBanner(act),
+                  const SizedBox(height: 16),
+                ],
+
+                // ── Pending validation banner ───────────────────────────────
+                if (act.isPendingValidation) ...[
+                  _buildValidationPendingBanner(act),
+                  const SizedBox(height: 16),
+                ],
+
+                // ── Completed banner ────────────────────────────────────────
+                if (act.isCompleted) ...[
+                  _buildCompletedBanner(act),
                   const SizedBox(height: 16),
                 ],
 
@@ -341,8 +383,17 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
                 ),
                 const SizedBox(height: 32),
 
-                // Join / Leave button (only for non-organizers, not during priority_pending)
-                if (!isOrganizer && !act.isPriorityPending) _joinButton(act),
+                // Join / Leave button (everyone, not during priority/terminal states)
+                // Creator can join their own group event just like any other participant
+                if (!act.isPriorityPending) _joinButton(act),
+
+                // Submit completion button (participants + organizer, in_progress only)
+                if (act.isInProgress &&
+                    (act.isJoined || isOrganizer) &&
+                    act.hasStarted) ...[
+                  const SizedBox(height: 12),
+                  _submitCompletionButton(act),
+                ],
               ],
             ),
           ),
@@ -351,9 +402,262 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
     );
   }
 
-  // ── Priority phase widgets ─────────────────────────────────────────────────
+  // ── Lock countdown banner ─────────────────────────────────────────────────
 
-  /// Banner shown to the event creator during the 1-minute priority window.
+  Widget _buildLockBanner(GroupActivity act) {
+    final isLocked = act.isLocked;
+    final timeLeft = act.timeUntilStart;
+    final mins = timeLeft.inMinutes.remainder(60).abs();
+    final secs = timeLeft.inSeconds.remainder(60).abs().toString().padLeft(2, '0');
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: isLocked
+              ? [const Color(0xFFB71C1C), const Color(0xFF7F0000)]
+              : [const Color(0xFFE65100), const Color(0xFFBF360C)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: (isLocked ? const Color(0xFFB71C1C) : const Color(0xFFE65100))
+                .withValues(alpha: 0.3),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(
+              isLocked ? Icons.lock_rounded : Icons.lock_clock_rounded,
+              color: Colors.white,
+              size: 20,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                isLocked
+                    ? 'Event Locked — starts soon'
+                    : 'Locking in $mins:$secs',
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          Text(
+            isLocked
+                ? 'Participant list is frozen. No more joining or leaving.'
+                : 'Event locks 5 minutes before start. Join or leave before then.',
+            style: const TextStyle(
+                color: Colors.white70, fontSize: 12, height: 1.4),
+          ),
+          if (!isLocked) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.black26,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.timer_rounded,
+                      color: Colors.white70, size: 16),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Starts in  $mins:$secs',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ── In-progress banner ────────────────────────────────────────────────────
+
+  Widget _buildInProgressBanner(GroupActivity act) {
+    final canSubmit = (act.isJoined || act.organizerId == _myId) && act.hasStarted;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1565C0), Color(0xFF0D47A1)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF1565C0).withValues(alpha: 0.3),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(children: [
+            Icon(Icons.play_circle_filled_rounded,
+                color: Colors.white, size: 20),
+            SizedBox(width: 8),
+            Text(
+              'Event In Progress',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          Text(
+            canSubmit
+                ? 'The event has started! Once you\'re done, submit your completion photos below.'
+                : 'The event is in progress. A participant will submit completion when done.',
+            style: const TextStyle(
+                color: Colors.white70, fontSize: 12, height: 1.4),
+          ),
+          if (canSubmit) ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _submitActing ? null : () => _goToCompletion(act),
+                icon: _submitActing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF0D47A1), strokeWidth: 2))
+                    : const Icon(Icons.camera_alt_rounded, size: 18),
+                label: const Text('Submit Completion Photos',
+                    style:
+                        TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF0D47A1),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                  elevation: 0,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ── Pending validation banner ─────────────────────────────────────────────
+
+  Widget _buildValidationPendingBanner(GroupActivity act) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+            color: const Color(0xFFF9A825).withValues(alpha: 0.5)),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Icon(Icons.how_to_vote_rounded,
+            color: Color(0xFFF9A825), size: 22),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Text(
+                  'Awaiting Community Validation',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                      color: Color(0xFF5D4037)),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Completion has been submitted. The community will vote to approve or reject it.',
+                  style: TextStyle(
+                      fontSize: 12, color: Color(0xFF795548), height: 1.4),
+                ),
+              ]),
+        ),
+      ]),
+    );
+  }
+
+  // ── Completed banner ──────────────────────────────────────────────────────
+
+  Widget _buildCompletedBanner(GroupActivity act) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF2E7D32), Color(0xFF1B5E20)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(children: [
+        const Icon(Icons.verified_rounded, color: Colors.amber, size: 26),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Event Completed!',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800),
+                ),
+                if (act.xpFinal > 0)
+                  Text(
+                    '+${act.xpFinal} XP awarded to all participants',
+                    style: const TextStyle(
+                        color: Colors.white70, fontSize: 12, height: 1.4),
+                  ),
+              ]),
+        ),
+      ]),
+    );
+  }
+
+  // ── Navigate to completion submission ────────────────────────────────────
+
+  Future<void> _goToCompletion(GroupActivity act) async {
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => WorkCompletionPage(
+          activityId: act.id,
+          activityTitle: act.title,
+        ),
+      ),
+    );
+    // Always reload: status may have changed to pending_validation
+    if (mounted) await _load();
+  }
   Widget _buildCreatorPriorityBanner(GroupActivity act) {
     final mins = _countdownSeconds ~/ 60;
     final secs = (_countdownSeconds % 60).toString().padLeft(2, '0');
@@ -548,22 +852,61 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
       );
 
   Widget _joinButton(GroupActivity act) {
+    // Don't show join/leave button in terminal states
+    if (act.isInProgress || act.isPendingValidation ||
+        act.isCompleted || act.status == 'rejected') {
+      return const SizedBox.shrink();
+    }
+
+    final isLocked = act.isLocked;
     final isFull = act.isFull && !act.isJoined;
-    final isNotOpen = !act.isOpen;
+    final isNotOpen = !act.isOpen && !isLocked;
+
+    String label;
+    IconData icon;
+    Color bgColor;
+    bool enabled;
+
+    if (isLocked) {
+      label = 'Event Locked';
+      icon = Icons.lock_rounded;
+      bgColor = Colors.grey.shade500;
+      enabled = false;
+    } else if (act.isJoined) {
+      label = 'Leave Event';
+      icon = Icons.exit_to_app_rounded;
+      bgColor = Colors.red.shade700;
+      enabled = !_toggling;
+    } else if (isFull) {
+      label = 'Event Full';
+      icon = Icons.people_alt_rounded;
+      bgColor = Colors.grey.shade500;
+      enabled = false;
+    } else if (isNotOpen) {
+      label = 'Not Available';
+      icon = Icons.cancel_rounded;
+      bgColor = Colors.grey.shade500;
+      enabled = false;
+    } else {
+      label = 'Join Event';
+      icon = Icons.group_add_rounded;
+      bgColor = _green;
+      enabled = !_toggling;
+    }
 
     return SizedBox(
       width: double.infinity,
       height: 52,
       child: ElevatedButton(
-        onPressed: (_toggling || isFull || isNotOpen) ? null : _toggleJoin,
+        onPressed: enabled ? _toggleJoin : null,
         style: ElevatedButton.styleFrom(
-          backgroundColor: act.isJoined ? Colors.red.shade700 : _green,
+          backgroundColor: bgColor,
           foregroundColor: Colors.white,
-          disabledBackgroundColor: Colors.grey.shade300,
-          disabledForegroundColor: Colors.grey.shade600,
+          disabledBackgroundColor: bgColor.withValues(alpha: 0.6),
+          disabledForegroundColor: Colors.white70,
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-          elevation: 4,
+          elevation: enabled ? 4 : 0,
         ),
         child: _toggling
             ? const SizedBox(
@@ -574,26 +917,39 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
             : Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(
-                    act.isJoined
-                        ? Icons.exit_to_app_rounded
-                        : Icons.group_add_rounded,
-                    size: 20,
-                  ),
+                  Icon(icon, size: 20),
                   const SizedBox(width: 8),
-                  Text(
-                    isNotOpen
-                        ? 'Activity Closed'
-                        : isFull
-                            ? 'Event Full'
-                            : act.isJoined
-                                ? 'Leave Event'
-                                : 'Join Event',
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w700),
-                  ),
+                  Text(label,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w700)),
                 ],
               ),
+      ),
+    );
+  }
+
+  Widget _submitCompletionButton(GroupActivity act) {
+    return SizedBox(
+      width: double.infinity,
+      height: 52,
+      child: ElevatedButton.icon(
+        onPressed: _submitActing ? null : () => _goToCompletion(act),
+        icon: _submitActing
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                    color: Colors.white, strokeWidth: 2.5))
+            : const Icon(Icons.camera_alt_rounded, size: 20),
+        label: const Text('Submit Completion',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF1565C0),
+          foregroundColor: Colors.white,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          elevation: 4,
+        ),
       ),
     );
   }
@@ -607,30 +963,7 @@ class _StatusRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isOpen = activity.isOpen && !activity.isFull;
-    final isFull = activity.isFull;
-
-    Color chipColor;
-    String chipLabel;
-    IconData chipIcon;
-
-    if (isFull) {
-      chipColor = Colors.orange.shade700;
-      chipLabel = 'Full';
-      chipIcon = Icons.people_alt_rounded;
-    } else if (activity.status == 'waiting') {
-      chipColor = Colors.orange.shade600;
-      chipLabel = 'Pending Approval';
-      chipIcon = Icons.hourglass_top_rounded;
-    } else if (isOpen) {
-      chipColor = const Color(0xFF2E7D32);
-      chipLabel = 'Open';
-      chipIcon = Icons.check_circle_rounded;
-    } else {
-      chipColor = Colors.grey.shade600;
-      chipLabel = activity.status.toUpperCase();
-      chipIcon = Icons.cancel_rounded;
-    }
+    final (chipLabel, chipColor, chipIcon) = _resolveStatus();
 
     return Row(
       children: [
@@ -684,6 +1017,23 @@ class _StatusRow extends StatelessWidget {
       ],
     );
   }
+
+  (String, Color, IconData) _resolveStatus() {
+    if (activity.isFull && activity.isOpen) {
+      return ('Full', Colors.orange.shade700, Icons.people_alt_rounded);
+    }
+    return switch (activity.status) {
+      'waiting'            => ('Pending Approval',    Colors.orange.shade600,    Icons.hourglass_top_rounded),
+      'priority_pending'   => ('Priority Phase',      Colors.amber.shade700,     Icons.star_rounded),
+      'open' || 'approved' => ('Open',                const Color(0xFF2E7D32),   Icons.check_circle_rounded),
+      'locked'             => ('Locked',              Colors.red.shade700,       Icons.lock_rounded),
+      'in_progress'        => ('In Progress',         const Color(0xFF1565C0),   Icons.play_circle_filled_rounded),
+      'pending_validation' => ('Awaiting Validation', Colors.amber.shade800,     Icons.how_to_vote_rounded),
+      'completed'          => ('Completed',           const Color(0xFF2E7D32),   Icons.verified_rounded),
+      'rejected'           => ('Rejected',            Colors.red.shade900,       Icons.cancel_rounded),
+      _                    => (activity.status.toUpperCase(), Colors.grey.shade600, Icons.info_rounded),
+    };
+  }
 }
 
 // ─── Info grid ────────────────────────────────────────────────────────────────
@@ -694,12 +1044,37 @@ class _InfoGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final eventDate = activity.eventDate;
+    final timeLeft = activity.timeUntilStart;
+    final hasStarted = activity.hasStarted;
+
+    String? remainingLabel;
+    if (eventDate != null && !hasStarted) {
+      if (timeLeft.inDays > 0) {
+        remainingLabel = '${timeLeft.inDays}d ${timeLeft.inHours.remainder(24)}h remaining';
+      } else if (timeLeft.inHours > 0) {
+        remainingLabel = '${timeLeft.inHours}h ${timeLeft.inMinutes.remainder(60)}m remaining';
+      } else if (timeLeft.inMinutes > 0) {
+        remainingLabel = '${timeLeft.inMinutes}m ${timeLeft.inSeconds.remainder(60)}s remaining';
+      } else {
+        remainingLabel = 'Starting now';
+      }
+    } else if (hasStarted) {
+      remainingLabel = 'Event has started';
+    }
+
     final items = <_InfoItem>[
-      if (activity.eventDate != null)
+      if (eventDate != null)
         _InfoItem(
           icon: Icons.event_rounded,
-          label: 'Date & Time',
-          value: _fmt(activity.eventDate!),
+          label: 'Event Start',
+          value: _fmt(eventDate),
+        ),
+      if (remainingLabel != null)
+        _InfoItem(
+          icon: hasStarted ? Icons.play_arrow_rounded : Icons.schedule_rounded,
+          label: hasStarted ? 'Status' : 'Time Remaining',
+          value: remainingLabel,
         ),
       _InfoItem(
         icon: Icons.people_rounded,
@@ -707,6 +1082,12 @@ class _InfoGrid extends StatelessWidget {
         value:
             '${activity.currentParticipants} / ${activity.maxParticipants}  (${activity.spotsLeft} spots left)',
       ),
+      if (activity.xpFinal > 0)
+        _InfoItem(
+          icon: Icons.star_rounded,
+          label: 'XP Reward',
+          value: '+${activity.xpFinal} XP per participant',
+        ),
       if (activity.location != null)
         _InfoItem(
           icon: Icons.location_on_rounded,

@@ -160,7 +160,8 @@ class _WorkCompletionPageState extends State<WorkCompletionPage> {
           backgroundColor: Color(0xFF2E7D32),
           behavior: SnackBarBehavior.floating,
         ));
-        Navigator.pop(context);
+        // Return true so the caller knows submission was successful
+        Navigator.pop(context, true);
       }
     } catch (e) {
       debugPrint('[WorkCompletion] Submit error: $e');
@@ -175,6 +176,14 @@ class _WorkCompletionPageState extends State<WorkCompletionPage> {
           'You are not the assigned worker for this activity.',
         'not_in_progress' =>
           'This activity is not in progress — completion cannot be submitted.',
+        'event_not_in_progress' =>
+          'The group event is not currently in progress.',
+        'event_not_started_yet' =>
+          'The event has not started yet — wait until the event start time.',
+        'not_a_participant' =>
+          'You must be a confirmed participant to submit completion.',
+        'no_completion_photos' =>
+          'Please upload at least one after-photo before submitting.',
         'activity_not_found' => 'Activity not found.',
         _ => 'Could not submit. Please try again.',
       };
