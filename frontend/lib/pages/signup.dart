@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter/services.dart';
 import 'dart:io';
 import 'login.dart';
 
@@ -43,6 +44,16 @@ class _SignUpPageState extends State<SignUpPage> {
     if (name.isEmpty || phone.isEmpty || email.isEmpty || password.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please fill in all fields.')),
+      );
+      return;
+    }
+
+    // Validate phone number format (10 digits, must start with 05, 06, or 07)
+    if (!_isValidPhoneNumber(phone)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Phone number must start with 05, 06, or 07 and be 10 digits (e.g., 0559079178).'),
+        ),
       );
       return;
     }
@@ -114,6 +125,11 @@ class _SignUpPageState extends State<SignUpPage> {
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  /// Validate phone number format (must be exactly 10 digits and start with 05, 06, or 07)
+  bool _isValidPhoneNumber(String phone) {
+    return RegExp(r'^0[567]\d{8}$').hasMatch(phone);
   }
 
   @override
@@ -202,6 +218,11 @@ class _SignUpPageState extends State<SignUpPage> {
                 "Phone number",
                 Icons.phone,
                 controller: phoneController,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(10),
+                ],
+                keyboardType: TextInputType.phone,
               ),
               buildInput(
                 "Email Address",
@@ -265,12 +286,16 @@ class _SignUpPageState extends State<SignUpPage> {
     bool isPassword = false,
     bool obscure = false,
     VoidCallback? onToggle,
+    List<TextInputFormatter>? inputFormatters,
+    TextInputType keyboardType = TextInputType.text,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 15),
       child: TextField(
         controller: controller,
         obscureText: isPassword && obscure,
+        keyboardType: keyboardType,
+        inputFormatters: inputFormatters,
         decoration: InputDecoration(
           hintText: hint,
           prefixIcon: Icon(icon),
