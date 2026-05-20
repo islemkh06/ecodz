@@ -195,10 +195,7 @@ class _LoginPageState extends State<LoginPage> {
 
             const SizedBox(height: 10),
 
-            const Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [Text("Remember me"), Text("Forgot password?")],
-            ),
+           
 
             const Spacer(),
 
@@ -218,7 +215,7 @@ class _LoginPageState extends State<LoginPage> {
                           "Login",
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
-                            color: Colors.black,
+                            color: Colors.white,
                           ),
                         ),
                 ),
