@@ -7,6 +7,7 @@ import 'location_picker.dart';
 import 'duplicate_check_modal.dart';
 import '../services/activity_duplicate_service.dart';
 import '../services/photo_metadata_service.dart';
+import '../services/user_service.dart';
 
 class CreateActivityModal extends StatefulWidget {
   final VoidCallback onActivityCreated;
@@ -131,6 +132,19 @@ class _CreateActivityModalState extends State<CreateActivityModal> {
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+
+    // Check level permission (Level 1 cannot create single activities)
+    final userLevel = UserService.instance.profile?.level ?? 1;
+    if (userLevel < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('You need to reach Level 2 (Sprout) to create activities.'),
+          backgroundColor: Colors.orange,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
 
     final user = _supabase.auth.currentUser;
     if (user == null) {

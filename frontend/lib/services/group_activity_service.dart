@@ -29,10 +29,6 @@ class GroupActivity {
   final String? categoryName;
   final int xpFinal;               // XP reward shown on the card
 
-  /// Set when the event is in the creator-priority phase
-  final DateTime? priorityDeadline;
-  final String? creatorPriorityStatus; // 'pending' | 'accepted' | 'declined' | 'expired'
-
   /// Populated at query time for the current user
   bool isJoined;
 
@@ -54,8 +50,6 @@ class GroupActivity {
     this.imageUrl,
     this.categoryName,
     this.xpFinal = 0,
-    this.priorityDeadline,
-    this.creatorPriorityStatus,
     this.isJoined = false,
   });
 
@@ -98,10 +92,6 @@ class GroupActivity {
       imageUrl: imageUrl,
       categoryName: categoryName,
       xpFinal: (m['xpfinal'] as num?)?.toInt() ?? 0,
-      priorityDeadline: m['priority_deadline'] != null
-          ? DateTime.tryParse(m['priority_deadline'] as String)?.toLocal()
-          : null,
-      creatorPriorityStatus: m['creator_priority_status'] as String?,
     );
   }
 
@@ -111,9 +101,6 @@ class GroupActivity {
 
   /// True only when the event is openly available for join/leave.
   bool get isOpen => status == 'open' || status == 'approved';
-
-  /// True during the 1-minute creator priority window.
-  bool get isPriorityPending => status == 'priority_pending';
 
   /// True when the event is locked (5 min before start) - no join/leave.
   bool get isLocked => status == 'locked';
@@ -204,7 +191,6 @@ class GroupActivityService {
       'id_act, titre, description, localisation, latitude, longitude, '
       'id_utilisateur, status, datecreation, event_image_url, xpfinal, '
       'max_participants, current_participants_count, event_date, locked_at, '
-      'priority_deadline, creator_priority_status, '
       'type_activite(nom), '
       'creator:profiles!activite_id_utilisateur_fkey(full_name), '
       'preuve(url), '
@@ -283,11 +269,11 @@ class GroupActivityService {
         .from('activite')
         .select(_kGroupActivityFields)
         .eq('activity_mode', 'group')
-        // Show open/approved/locked/in_progress events to everyone;
-        // also show this user's own priority_pending events (their 1-min window)
-        .or(
-          'status.in.(open,approved,locked,in_progress),'
-          'and(status.eq.priority_pending,id_utilisateur.eq.$uid)',
+        // Show open/approved/locked/in_progress events to everyone
+        // (no priority_pending anymore - organizer is auto-added on approval)
+        .inFilter(
+          'status',
+          ['open', 'approved', 'locked', 'in_progress'],
         )
         .order('event_date', ascending: true)
         .limit(50);
@@ -339,52 +325,6 @@ class GroupActivityService {
           (m) => ActivityParticipant.fromMap(m as Map<String, dynamic>),
         )
         .toList();
-  }
-
-  // ── Creator Priority RPCs ─────────────────────────────────────────────────
-
-  /// Creator accepts priority participation. Returns null on success.
-  Future<String?> acceptCreatorPriority(int activityId) async {
-    try {
-      final result = await _db.rpc(
-        'accept_creator_priority',
-        params: {'p_activity_id': activityId},
-      ) as Map<String, dynamic>;
-      if (result['success'] == true) return null;
-      return _humanizeError(result['error'] as String? ?? 'unknown_error');
-    } on PostgrestException catch (e) {
-      return e.message;
-    } catch (e) {
-      return e.toString();
-    }
-  }
-
-  /// Creator declines priority participation. Returns null on success.
-  Future<String?> declineCreatorPriority(int activityId) async {
-    try {
-      final result = await _db.rpc(
-        'decline_creator_priority',
-        params: {'p_activity_id': activityId},
-      ) as Map<String, dynamic>;
-      if (result['success'] == true) return null;
-      return _humanizeError(result['error'] as String? ?? 'unknown_error');
-    } on PostgrestException catch (e) {
-      return e.message;
-    } catch (e) {
-      return e.toString();
-    }
-  }
-
-  /// Auto-expire the priority window server-side (called when client timer hits 0).
-  Future<void> expireCreatorPriority(int activityId) async {
-    try {
-      await _db.rpc(
-        'expire_creator_priority',
-        params: {'p_activity_id': activityId},
-      );
-    } catch (_) {
-      // Non-critical – the DB will handle expiry on next RPC call anyway
-    }
   }
 
   // ── Lifecycle: refresh status ─────────────────────────────────────────────
@@ -485,14 +425,8 @@ class GroupActivityService {
         return 'You must be a confirmed participant to submit completion.';
       case 'no_completion_photos':
         return 'Please upload at least one after-photo before submitting.';
-      case 'creator_priority_active':
-        return 'The event creator has a 1-minute priority window. Please try again shortly.';
-      case 'priority_expired':
-        return 'The priority window has expired. The event is now open.';
       case 'not_creator':
         return 'Only the event creator can perform this action.';
-      case 'not_in_priority_phase':
-        return 'This event is no longer in the priority phase.';
       default:
         return 'Something went wrong. Please try again.';
     }

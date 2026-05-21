@@ -24,13 +24,8 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
   bool _loading = true;
   bool _loadingParticipants = false;
   bool _toggling = false;
-  bool _priorityActing = false;
   bool _submitActing = false;
   String? _error;
-
-  // ── Priority countdown ──────────────────────────────────────────────────────
-  Timer? _priorityTimer;
-  int _countdownSeconds = 0;
 
   // ── Lifecycle: lock countdown + status auto-refresh ──────────────────────
   Timer? _lifecycleTimer;
@@ -73,102 +68,11 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
             value: widget.activityId,
           ),
           callback: (payload) {
-            // Row changed (e.g., status → priority_pending after vote)
+            // Row changed (e.g., status → open after vote)
             if (mounted) _load();
           },
         )
         .subscribe();
-  }
-
-  // ── Priority countdown ──────────────────────────────────────────────────────
-  void _startPriorityCountdown() {
-    _stopPriorityCountdown();
-    final deadline = _activity?.priorityDeadline;
-    if (deadline == null) return;
-
-    final remaining = deadline.difference(DateTime.now());
-    if (remaining.isNegative) {
-      _expirePriority();
-      return;
-    }
-
-    setState(() => _countdownSeconds = remaining.inSeconds.clamp(0, 60));
-
-    _priorityTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      final rem = (_activity?.priorityDeadline
-                  ?.difference(DateTime.now())
-                  .inSeconds ??
-              -1)
-          .clamp(0, 60);
-      if (rem <= 0) {
-        _stopPriorityCountdown();
-        _expirePriority();
-      } else {
-        setState(() => _countdownSeconds = rem);
-      }
-    });
-  }
-
-  void _stopPriorityCountdown() {
-    _priorityTimer?.cancel();
-    _priorityTimer = null;
-  }
-
-  Future<void> _expirePriority() async {
-    await GroupActivityService.instance.expireCreatorPriority(widget.activityId);
-    if (mounted) _load();
-  }
-
-  // ── Priority accept / decline ───────────────────────────────────────────────
-  Future<void> _acceptPriority() async {
-    setState(() => _priorityActing = true);
-    final err = await GroupActivityService.instance
-        .acceptCreatorPriority(widget.activityId);
-    if (!mounted) return;
-    if (err != null) {
-      _snack(err, isError: true);
-    } else {
-      _snack('You joined! The event is now open to all participants.');
-      _stopPriorityCountdown();
-    }
-    setState(() => _priorityActing = false);
-    await _load();
-  }
-
-  Future<void> _declinePriority() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Skip priority spot?'),
-        content: const Text(
-            'The event will immediately open to other participants. You can still join normally afterwards.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Skip'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-
-    setState(() => _priorityActing = true);
-    final err = await GroupActivityService.instance
-        .declineCreatorPriority(widget.activityId);
-    if (!mounted) return;
-    if (err != null) {
-      _snack(err, isError: true);
-    } else {
-      _snack('Priority skipped. The event is now public.');
-      _stopPriorityCountdown();
-    }
-    setState(() => _priorityActing = false);
-    await _load();
   }
 
   Future<void> _load() async {
@@ -184,12 +88,6 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
         _activity = act;
         _loading = false;
       });
-      // Start or stop countdown based on priority phase
-      if (act.isPriorityPending && act.organizerId == _myId) {
-        _startPriorityCountdown();
-      } else {
-        _stopPriorityCountdown();
-      }
       _loadParticipants();
     } catch (e) {
       if (mounted) setState(() { _error = e.toString(); _loading = false; });
@@ -244,7 +142,6 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
 
   @override
   void dispose() {
-    _stopPriorityCountdown();
     _lifecycleTimer?.cancel();
     _realtimeChannel?.unsubscribe();
     super.dispose();
@@ -303,15 +200,6 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
                 // Status row
                 _StatusRow(activity: act),
                 const SizedBox(height: 16),
-
-                // ── Priority banner (only during priority_pending) ──────────
-                if (act.isPriorityPending) ...[
-                  if (isOrganizer)
-                    _buildCreatorPriorityBanner(act)
-                  else
-                    _buildWaitingForCreatorBanner(act),
-                  const SizedBox(height: 16),
-                ],
 
                 // ── Lock countdown banner (5 min window before start) ───────
                 if (act.isWithinLockWindow || act.isLocked) ...[
@@ -383,9 +271,8 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
                 ),
                 const SizedBox(height: 32),
 
-                // Join / Leave button (everyone, not during priority/terminal states)
-                // Creator can join their own group event just like any other participant
-                if (!act.isPriorityPending) _joinButton(act),
+                // Join / Leave button (everyone, not in terminal states)
+                _joinButton(act),
 
                 // Submit completion button (participants + organizer, in_progress only)
                 if (act.isInProgress &&
@@ -658,177 +545,6 @@ class _GroupActivityDetailPageState extends State<GroupActivityDetailPage> {
     // Always reload: status may have changed to pending_validation
     if (mounted) await _load();
   }
-  Widget _buildCreatorPriorityBanner(GroupActivity act) {
-    final mins = _countdownSeconds ~/ 60;
-    final secs = (_countdownSeconds % 60).toString().padLeft(2, '0');
-    final urgency = _countdownSeconds <= 15;
-
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: urgency
-              ? [const Color(0xFFE65100), const Color(0xFFBF360C)]
-              : [const Color(0xFF2E7D32), const Color(0xFF1B5E20)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: (urgency ? const Color(0xFFE65100) : const Color(0xFF1B5E20))
-                .withValues(alpha: 0.35),
-            blurRadius: 14,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header
-          Row(children: [
-            const Icon(Icons.star_rounded, color: Colors.amber, size: 22),
-            const SizedBox(width: 8),
-            const Expanded(
-              child: Text(
-                'You have Priority Participation!',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w800),
-              ),
-            ),
-          ]),
-          const SizedBox(height: 6),
-          const Text(
-            'As the event creator, you get the first spot — confirm within the countdown.',
-            style: TextStyle(
-                color: Colors.white70, fontSize: 12.5, height: 1.4),
-          ),
-          const SizedBox(height: 14),
-
-          // Countdown
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: Colors.black26,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.timer_rounded,
-                    color: Colors.white70, size: 18),
-                const SizedBox(width: 8),
-                Text(
-                  'Time remaining: $mins:$secs',
-                  style: TextStyle(
-                    color: urgency ? Colors.amber : Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
-
-          // Buttons
-          if (_priorityActing)
-            const Center(
-              child: SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                    color: Colors.white, strokeWidth: 2.5),
-              ),
-            )
-          else
-            Row(children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _acceptPriority,
-                  icon: const Icon(Icons.check_circle_rounded, size: 18),
-                  label: const Text('Confirm Participation',
-                      style: TextStyle(
-                          fontWeight: FontWeight.w700, fontSize: 13)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xFF1B5E20),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10)),
-                    elevation: 0,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              OutlinedButton.icon(
-                onPressed: _declinePriority,
-                icon: const Icon(Icons.cancel_outlined, size: 16),
-                label: const Text('Skip',
-                    style: TextStyle(fontSize: 13)),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.white70,
-                  side: const BorderSide(color: Colors.white30),
-                  padding: const EdgeInsets.symmetric(
-                      vertical: 12, horizontal: 16),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
-            ]),
-        ],
-      ),
-    );
-  }
-
-  /// Banner shown to OTHER users while the creator has priority.
-  Widget _buildWaitingForCreatorBanner(GroupActivity act) {
-    final deadline = act.priorityDeadline;
-    final rem = deadline != null
-        ? deadline.difference(DateTime.now()).inSeconds.clamp(0, 60)
-        : 0;
-    final mins = rem ~/ 60;
-    final secs = (rem % 60).toString().padLeft(2, '0');
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFFF8E1),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFFFCC02).withValues(alpha: 0.6)),
-      ),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Icon(Icons.hourglass_top_rounded,
-            color: Color(0xFFF57F17), size: 22),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text(
-              'Awaiting creator confirmation',
-              style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
-                  color: Color(0xFF5D4037)),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              rem > 0
-                  ? 'The creator has $mins:$secs to claim their spot.\nJoin will open immediately after.'
-                  : 'Join is opening soon…',
-              style: const TextStyle(
-                  fontSize: 12, color: Color(0xFF795548), height: 1.4),
-            ),
-          ]),
-        ),
-      ]),
-    );
-  }
-
   Widget _sectionTitle(String text) => Text(
         text,
         style: const TextStyle(
@@ -1024,7 +740,6 @@ class _StatusRow extends StatelessWidget {
     }
     return switch (activity.status) {
       'waiting'            => ('Pending Approval',    Colors.orange.shade600,    Icons.hourglass_top_rounded),
-      'priority_pending'   => ('Priority Phase',      Colors.amber.shade700,     Icons.star_rounded),
       'open' || 'approved' => ('Open',                const Color(0xFF2E7D32),   Icons.check_circle_rounded),
       'locked'             => ('Locked',              Colors.red.shade700,       Icons.lock_rounded),
       'in_progress'        => ('In Progress',         const Color(0xFF1565C0),   Icons.play_circle_filled_rounded),

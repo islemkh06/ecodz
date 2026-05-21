@@ -141,6 +141,7 @@ $$;
 -- ---------------------------------------------------------------------------
 -- 5. update join_group_activity
 --    Reject joins when the event is locked or already in_progress.
+--    No priority phase logic (organizer is auto-added on approval).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.join_group_activity(
   p_activity_id integer,
@@ -192,20 +193,7 @@ BEGIN
     RETURN json_build_object('success', false, 'error', 'event_started');
   END IF;
 
-  -- Handle creator priority phase
-  IF v_act.status = 'priority_pending' THEN
-    IF now() > v_act.priority_deadline THEN
-      UPDATE public.activite
-         SET status                  = 'open',
-             creator_priority_status = 'expired'
-       WHERE id_act = p_activity_id;
-      v_act.status := 'open';
-    ELSIF v_act.id_utilisateur <> p_user_id THEN
-      RETURN json_build_object('success', false, 'error', 'creator_priority_active');
-    END IF;
-  END IF;
-
-  IF v_act.status NOT IN ('open', 'approved', 'priority_pending') THEN
+  IF v_act.status NOT IN ('open', 'approved') THEN
     RETURN json_build_object('success', false, 'error', 'activity_not_open');
   END IF;
 
@@ -422,6 +410,36 @@ BEGIN
 
   IF v_status <> 'pending_validation' THEN
     RETURN jsonb_build_object('error', 'voting_closed', 'status', v_status);
+  END IF;
+
+  -- Validate XP proposal is within level-defined bounds (if approving)
+  IF p_approve AND p_xp_proposal IS NOT NULL THEN
+    DECLARE
+      v_xp_min integer;
+      v_xp_max integer;
+    BEGIN
+      SELECT xpmin, xpmax
+        INTO v_xp_min, v_xp_max
+        FROM activite a
+        JOIN niveau_activite n ON a.id_niv_act = n.id_niv_act
+       WHERE a.id_act = p_act_id;
+
+      IF v_xp_min IS NOT NULL AND p_xp_proposal < v_xp_min THEN
+        RETURN jsonb_build_object(
+          'error', 'xp_below_min',
+          'min_xp', v_xp_min,
+          'proposed_xp', p_xp_proposal
+        );
+      END IF;
+
+      IF v_xp_max IS NOT NULL AND p_xp_proposal > v_xp_max THEN
+        RETURN jsonb_build_object(
+          'error', 'xp_above_max',
+          'max_xp', v_xp_max,
+          'proposed_xp', p_xp_proposal
+        );
+      END IF;
+    END;
   END IF;
 
   -- For group events: enforce that the event has actually started
@@ -646,137 +664,21 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
--- 10. accept_creator_priority  (update for group event context)
---     Preserve existing behaviour, but also handle group event status chain.
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.accept_creator_priority(p_activity_id integer)
-RETURNS json
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-  v_act public.activite%ROWTYPE;
-  v_uid uuid;
-BEGIN
-  v_uid := auth.uid();
-  IF v_uid IS NULL THEN
-    RETURN json_build_object('success', false, 'error', 'unauthenticated');
-  END IF;
-
-  SELECT * INTO v_act
-    FROM public.activite
-   WHERE id_act = p_activity_id
-   FOR UPDATE;
-
-  IF NOT FOUND THEN
-    RETURN json_build_object('success', false, 'error', 'activity_not_found');
-  END IF;
-
-  IF v_act.status <> 'priority_pending' THEN
-    RETURN json_build_object('success', false, 'error', 'not_in_priority_phase');
-  END IF;
-
-  IF v_act.id_utilisateur <> v_uid THEN
-    RETURN json_build_object('success', false, 'error', 'not_creator');
-  END IF;
-
-  IF now() > v_act.priority_deadline THEN
-    UPDATE public.activite
-       SET status                  = 'open',
-           creator_priority_status = 'expired'
-     WHERE id_act = p_activity_id;
-    RETURN json_build_object('success', false, 'error', 'priority_expired');
-  END IF;
-
-  -- Join the creator as a participant and open the event
-  INSERT INTO public.activity_participants (activity_id, user_id, status)
-  VALUES (p_activity_id, v_uid, 'confirmed')
-  ON CONFLICT (activity_id, user_id)
-    DO UPDATE SET status = 'confirmed', joined_at = now();
-
-  UPDATE public.activite
-     SET status                   = 'open',
-         creator_priority_status  = 'accepted',
-         current_participants_count = (
-           SELECT COUNT(*) FROM public.activity_participants
-            WHERE activity_id = p_activity_id AND status = 'confirmed'
-         )
-   WHERE id_act = p_activity_id;
-
-  RETURN json_build_object('success', true);
-END;
-$$;
-
--- ---------------------------------------------------------------------------
--- 11. decline_creator_priority  (update for group event context)
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.decline_creator_priority(p_activity_id integer)
-RETURNS json
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-  v_act public.activite%ROWTYPE;
-  v_uid uuid;
-BEGIN
-  v_uid := auth.uid();
-  IF v_uid IS NULL THEN
-    RETURN json_build_object('success', false, 'error', 'unauthenticated');
-  END IF;
-
-  SELECT * INTO v_act
-    FROM public.activite
-   WHERE id_act = p_activity_id
-   FOR UPDATE;
-
-  IF NOT FOUND THEN
-    RETURN json_build_object('success', false, 'error', 'activity_not_found');
-  END IF;
-
-  IF v_act.status <> 'priority_pending' THEN
-    RETURN json_build_object('success', false, 'error', 'not_in_priority_phase');
-  END IF;
-
-  IF v_act.id_utilisateur <> v_uid THEN
-    RETURN json_build_object('success', false, 'error', 'not_creator');
-  END IF;
-
-  UPDATE public.activite
-     SET status                  = 'open',
-         creator_priority_status = 'declined'
-   WHERE id_act = p_activity_id;
-
-  RETURN json_build_object('success', true);
-END;
-$$;
-
--- ---------------------------------------------------------------------------
--- 12. expire_creator_priority  (update for group event context)
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.expire_creator_priority(p_activity_id integer)
-RETURNS json
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-BEGIN
-  UPDATE public.activite
-     SET status                  = 'open',
-         creator_priority_status = 'expired'
-   WHERE id_act          = p_activity_id
-     AND status          = 'priority_pending'
-     AND now()           > priority_deadline;
-
-  RETURN json_build_object('success', true);
-END;
-$$;
-
--- ---------------------------------------------------------------------------
--- 13. Humanize new error codes in the Flutter app (documentation only)
+-- 10-12. Legacy priority RPC functions (REMOVED)
 --
--- New error codes added by this migration:
+--     The following functions have been removed:
+--     - accept_creator_priority(integer)
+--     - decline_creator_priority(integer)
+--     - expire_creator_priority(integer)
+--
+--     Reason: Creator is now automatically added to participants on approval.
+--             No manual accept/decline step is needed.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- 13. Humanize error codes in the Flutter app (documentation only)
+--
+-- Error codes handled by lifecycle management:
 --   'event_locked'         → 'The event is locked 5 minutes before start. You can no longer join or leave.'
 --   'event_started'        → 'The event has already started.'
 --   'event_not_started'    → 'The event has not started yet.'
@@ -792,6 +694,5 @@ $$;
 --     'lock_due_group_events','start_due_group_events','refresh_group_event_status',
 --     'join_group_activity','leave_group_activity',
 --     'submit_group_event_completion','submit_work_completion',
---     'cast_completion_vote','accept_creator_priority',
---     'decline_creator_priority','expire_creator_priority'
+--     'cast_completion_vote'
 --   );

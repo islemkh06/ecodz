@@ -78,14 +78,14 @@ class _ValidationItem {
   final String location;
   final String date;
   final int xpFinal;
+  final int xpMin;
+  final int xpMax;
   final String imageUrl;
   final String categoryName;
   final int approveCount;
   final int rejectCount;
   final bool? myVote;
-  /// All "avant" (before) proof photo URLs
   final List<String> beforeUrls;
-  /// All "apres" (after) proof photo URLs
   final List<String> afterUrls;
 
   const _ValidationItem({
@@ -98,6 +98,8 @@ class _ValidationItem {
     required this.location,
     required this.date,
     required this.xpFinal,
+    this.xpMin = 0,
+    this.xpMax = 100,
     required this.imageUrl,
     required this.categoryName,
     required this.approveCount,
@@ -176,7 +178,6 @@ class _ActivityPageState extends State<ActivityPage>
 
   int _sectionIndex = 0;
 
-  // ── Community tabs ──────────────────────────────────────────────────────────
   late TabController _communityTabController;
 
   List<_ApprovalItem> _approvalItems = [];
@@ -193,7 +194,6 @@ class _ActivityPageState extends State<ActivityPage>
   bool _loadingHistory = false;
   bool _historyLoaded = false;
 
-  // ── My Work tabs ────────────────────────────────────────────────────────────
   late TabController _workTabController;
 
   List<_WorkItem> _priorityItems = [];
@@ -355,7 +355,9 @@ class _ActivityPageState extends State<ActivityPage>
           .select(
             'id_act, assigned_worker_id, id_utilisateur, activity_mode, '
             'titre, description, localisation, '
-            'datecreation, xpfinal, type_activite(nom), preuve(url, type)',
+            'datecreation, xpfinal, type_activite(nom), '
+            'niveau_activite(xpmin, xpmax), '
+            'preuve(url, type)',
           )
           .eq('status', 'pending_validation')
           .order('completed_at', ascending: false);
@@ -407,10 +409,14 @@ class _ActivityPageState extends State<ActivityPage>
             .map((p) => p['url'] as String? ?? '')
             .where((u) => u.isNotEmpty)
             .toList();
-        // Hero image: prefer first after photo, else first before photo
         final heroUrl = afterUrls.isNotEmpty
             ? afterUrls.first
             : (beforeUrls.isNotEmpty ? beforeUrls.first : '');
+
+        final nd = act['niveau_activite'] as Map<String, dynamic>?;
+        final xpMin = (nd?['xpmin'] as num?)?.toInt() ?? 0;
+        final xpMax = (nd?['xpmax'] as num?)?.toInt() ?? 100;
+
         return _ValidationItem(
           id: id,
           workerId: act['assigned_worker_id'] as String? ?? '',
@@ -421,6 +427,8 @@ class _ActivityPageState extends State<ActivityPage>
           location: act['localisation'] as String? ?? '',
           date: _fmtDate(act['datecreation'] as String?),
           xpFinal: (act['xpfinal'] as num?)?.toInt() ?? 0,
+          xpMin: xpMin,
+          xpMax: xpMax,
           imageUrl: heroUrl,
           categoryName: td?['nom'] as String? ?? '',
           approveCount: appC[id] ?? 0,
@@ -623,14 +631,11 @@ class _ActivityPageState extends State<ActivityPage>
     }
   }
 
-  // ── Events Tab loader ────────────────────────────────────────────────────────
-
   Future<void> _loadEvents() async {
     final uid = _myId;
     if (uid == null) return;
     setState(() => _loadingEvents = true);
 
-    // Fire server-side lifecycle advancement (non-blocking)
     Supabase.instance.client.rpc('lock_due_group_events').catchError((_) {});
     Supabase.instance.client.rpc('start_due_group_events').catchError((_) {});
 
@@ -873,6 +878,9 @@ class _ActivityPageState extends State<ActivityPage>
         'already_voted' => 'You already validated this work.',
         'voting_closed' => 'Validation is already closed.',
         'own_work' => 'You cannot validate your own submitted work.',
+        'xp_below_min' => 'Your XP proposal is below the minimum for this level.',
+        'xp_above_max' => 'Your XP proposal exceeds the maximum for this level.',
+        'event_not_started_yet' => 'The event has not started yet. Validation will open once the event begins.',
         _ => 'Could not cast vote. Please try again.',
       };
 
@@ -908,50 +916,116 @@ class _ActivityPageState extends State<ActivityPage>
     );
   }
 
-  Future<int?> _askXpProposal(int suggestedXp) async {
-    final ctrl = TextEditingController(text: suggestedXp.toString());
+  // ── FIX: capture xpMin/xpMax/xpFinal from item BEFORE entering showDialog
+  Future<int?> _askXpProposal(_ValidationItem item) async {
+    final xpMin = item.xpMin;
+    final xpMax = item.xpMax;
+    final xpFinal = item.xpFinal;
+
+    final ctrl = TextEditingController(text: xpFinal.toString());
+
     return showDialog<int>(
       context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Propose XP Reward',
-            style: TextStyle(fontWeight: FontWeight.w800)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'How many XP should the worker earn?\n'
-              'The final reward is the average of all YES votes.',
-              style: TextStyle(fontSize: 13, color: Colors.black54),
+      builder: (_) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          String? errorText;
+          return AlertDialog(
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20)),
+            title: const Text('Propose XP Reward',
+                style: TextStyle(fontWeight: FontWeight.w800)),
+            content: StatefulBuilder(
+              builder: (context, setInnerState) {
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'How many XP should the worker earn?\n'
+                      'The final reward is the average of all YES votes.',
+                      style: TextStyle(fontSize: 13, color: Colors.black54),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE8F5E9),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                            color: const Color(0xFF2E7D32), width: 1.5),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.info_outline,
+                              color: Color(0xFF2E7D32), size: 18),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Allowed XP: $xpMin – $xpMax XP',
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF2E7D32),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    TextField(
+                      controller: ctrl,
+                      keyboardType: TextInputType.number,
+                      onChanged: (_) {
+                        setInnerState(() => errorText = null);
+                      },
+                      decoration: InputDecoration(
+                        labelText: 'XP Proposal',
+                        hintText: 'Enter XP between $xpMin and $xpMax',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        suffixText: 'XP',
+                        errorText: errorText,
+                        errorStyle: const TextStyle(
+                            color: Colors.red, fontSize: 12),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: ctrl,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                labelText: 'XP Proposal',
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-                suffixText: 'XP',
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
               ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: _green),
-            onPressed: () {
-              final val = int.tryParse(ctrl.text.trim());
-              Navigator.pop(context, val);
-            },
-            child: const Text('Confirm'),
-          ),
-        ],
+              FilledButton(
+                style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF2E7D32)),
+                onPressed: () {
+                  final val = int.tryParse(ctrl.text.trim());
+                  if (val == null) {
+                    setDialogState(() => errorText = 'Enter a valid number');
+                    return;
+                  }
+                  if (val < xpMin) {
+                    setDialogState(() =>
+                        errorText = 'XP cannot be less than $xpMin');
+                    return;
+                  }
+                  if (val > xpMax) {
+                    setDialogState(() =>
+                        errorText = 'XP cannot exceed $xpMax');
+                    return;
+                  }
+                  Navigator.pop(context, val);
+                },
+                child: const Text('Confirm'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1144,95 +1218,95 @@ class _ActivityPageState extends State<ActivityPage>
         }
       },
       child: _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _cardImage(
-            item.imageUrl,
-            item.categoryName,
-            item.xpLabel,
-            closed: item.votingClosed,
-            closedLabel: 'Voting Closed',
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(item.title, style: _titleStyle),
-                if (item.description.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    item.description,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: _subStyle,
-                  ),
-                ],
-                const SizedBox(height: 10),
-                Wrap(spacing: 12, runSpacing: 4, children: [
-                  if (item.location.isNotEmpty)
-                    _chip(Icons.location_on_rounded, item.location),
-                  if (item.date.isNotEmpty)
-                    _chip(Icons.calendar_today_rounded, item.date),
-                  if (item.levelName.isNotEmpty)
-                    _chip(Icons.military_tech_rounded, item.levelName),
-                ]),
-                const SizedBox(height: 14),
-                _voteProgress(item.approveCount, item.rejectCount, 2),
-                const SizedBox(height: 14),
-                if (isOwner)
-                  _infoBanner(
-                    Icons.person_rounded,
-                    'This is your activity – you cannot vote on it.',
-                    _deepGreen,
-                  )
-                else if (item.votingClosed)
-                  _infoBanner(
-                    Icons.lock_rounded,
-                    'Voting closed (${item.approveCount > item.rejectCount ? "Approved" : "Rejected"}).',
-                    Colors.grey.shade600,
-                  )
-                else if (item.hasVoted)
-                  _infoBanner(
-                    Icons.check_circle_rounded,
-                    'You voted ${item.myVote == 1 ? "Approve" : "Reject"}.',
-                    _green,
-                  )
-                else if (isVoting)
-                  const Center(
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(vertical: 6),
-                      child: CircularProgressIndicator(
-                          color: _green, strokeWidth: 2.5),
-                    ),
-                  )
-                else
-                  Row(children: [
-                    Expanded(
-                      child: _actionBtn(
-                        'Approve',
-                        Icons.thumb_up_rounded,
-                        _approveColor,
-                        () => _castApprovalVote(item.id, 1),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _actionBtn(
-                        'Reject',
-                        Icons.thumb_down_rounded,
-                        _rejectColor,
-                        () => _castApprovalVote(item.id, -1),
-                      ),
-                    ),
-                  ]),
-              ],
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _cardImage(
+              item.imageUrl,
+              item.categoryName,
+              item.xpLabel,
+              closed: item.votingClosed,
+              closedLabel: 'Voting Closed',
             ),
-          ),
-        ],
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(item.title, style: _titleStyle),
+                  if (item.description.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      item.description,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: _subStyle,
+                    ),
+                  ],
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 12, runSpacing: 4, children: [
+                    if (item.location.isNotEmpty)
+                      _chip(Icons.location_on_rounded, item.location),
+                    if (item.date.isNotEmpty)
+                      _chip(Icons.calendar_today_rounded, item.date),
+                    if (item.levelName.isNotEmpty)
+                      _chip(Icons.military_tech_rounded, item.levelName),
+                  ]),
+                  const SizedBox(height: 14),
+                  _voteProgress(item.approveCount, item.rejectCount, 2),
+                  const SizedBox(height: 14),
+                  if (isOwner)
+                    _infoBanner(
+                      Icons.person_rounded,
+                      'This is your activity – you cannot vote on it.',
+                      _deepGreen,
+                    )
+                  else if (item.votingClosed)
+                    _infoBanner(
+                      Icons.lock_rounded,
+                      'Voting closed (${item.approveCount > item.rejectCount ? "Approved" : "Rejected"}).',
+                      Colors.grey.shade600,
+                    )
+                  else if (item.hasVoted)
+                    _infoBanner(
+                      Icons.check_circle_rounded,
+                      'You voted ${item.myVote == 1 ? "Approve" : "Reject"}.',
+                      _green,
+                    )
+                  else if (isVoting)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(vertical: 6),
+                        child: CircularProgressIndicator(
+                            color: _green, strokeWidth: 2.5),
+                      ),
+                    )
+                  else
+                    Row(children: [
+                      Expanded(
+                        child: _actionBtn(
+                          'Approve',
+                          Icons.thumb_up_rounded,
+                          _approveColor,
+                          () => _castApprovalVote(item.id, 1),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _actionBtn(
+                          'Reject',
+                          Icons.thumb_down_rounded,
+                          _rejectColor,
+                          () => _castApprovalVote(item.id, -1),
+                        ),
+                      ),
+                    ]),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
-    ),
     );
   }
 
@@ -1303,134 +1377,136 @@ class _ActivityPageState extends State<ActivityPage>
               })
           : null,
       child: _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _cardImage(
-            item.imageUrl,
-            item.categoryName,
-            item.xpFinal > 0 ? '+${item.xpFinal} XP' : '',
-            closed: false,
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(children: [
-                  Expanded(child: Text(item.title, style: _titleStyle)),
-                  if (item.isGroupEvent)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF2E7D32),
-                        borderRadius: BorderRadius.circular(99),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _cardImage(
+              item.imageUrl,
+              item.categoryName,
+              item.xpFinal > 0 ? '+${item.xpFinal} XP' : '',
+              closed: false,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Expanded(child: Text(item.title, style: _titleStyle)),
+                    if (item.isGroupEvent)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2E7D32),
+                          borderRadius: BorderRadius.circular(99),
+                        ),
+                        child: const Text(
+                          'Group Event',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700),
+                        ),
+                      )
+                    else
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1565C0),
+                          borderRadius: BorderRadius.circular(99),
+                        ),
+                        child: const Text(
+                          'Needs Validation',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700),
+                        ),
                       ),
-                      child: const Text(
-                        'Group Event',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700),
+                  ]),
+                  if (item.description.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(item.description,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: _subStyle),
+                  ],
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 12, runSpacing: 4, children: [
+                    if (item.location.isNotEmpty)
+                      _chip(Icons.location_on_rounded, item.location),
+                    if (item.date.isNotEmpty)
+                      _chip(Icons.calendar_today_rounded, item.date),
+                    if (item.categoryName.isNotEmpty)
+                      _chip(Icons.category_rounded, item.categoryName),
+                  ]),
+                  if (item.beforeUrls.isNotEmpty ||
+                      item.afterUrls.isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    _buildBeforeAfterPhotos(
+                        item.beforeUrls, item.afterUrls),
+                  ],
+                  const SizedBox(height: 14),
+                  _voteProgress(item.approveCount, item.rejectCount, 2),
+                  const SizedBox(height: 14),
+                  if (cannotVote)
+                    _infoBanner(
+                      isWorker
+                          ? Icons.work_rounded
+                          : Icons.groups_rounded,
+                      isWorker
+                          ? 'This is your submitted work.'
+                          : 'You organised this event \u2014 you cannot vote on it.',
+                      _deepGreen,
+                    )
+                  else if (item.hasVoted)
+                    _infoBanner(
+                      Icons.check_circle_rounded,
+                      'You voted ${item.myVote == true ? "Approve" : "Reject"}.',
+                      _green,
+                    )
+                  else if (isValidating)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(vertical: 6),
+                        child: CircularProgressIndicator(
+                            color: _green, strokeWidth: 2.5),
                       ),
                     )
                   else
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1565C0),
-                        borderRadius: BorderRadius.circular(99),
+                    Row(children: [
+                      Expanded(
+                        child: _actionBtn(
+                          'Approve',
+                          Icons.thumb_up_rounded,
+                          _approveColor,
+                          () async {
+                            // Pass the item so xpMin/xpMax are captured safely
+                            final xp = await _askXpProposal(item);
+                            if (xp != null) {
+                              _castCompletionVote(item.id, true, xp);
+                            }
+                          },
+                        ),
                       ),
-                      child: const Text(
-                        'Needs Validation',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _actionBtn(
+                          'Reject',
+                          Icons.thumb_down_rounded,
+                          _rejectColor,
+                          () => _castCompletionVote(item.id, false, null),
+                        ),
                       ),
-                    ),
-                ]),
-                if (item.description.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(item.description,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: _subStyle),
+                    ]),
                 ],
-                const SizedBox(height: 10),
-                Wrap(spacing: 12, runSpacing: 4, children: [
-                  if (item.location.isNotEmpty)
-                    _chip(Icons.location_on_rounded, item.location),
-                  if (item.date.isNotEmpty)
-                    _chip(Icons.calendar_today_rounded, item.date),
-                  if (item.categoryName.isNotEmpty)
-                    _chip(Icons.category_rounded, item.categoryName),
-                ]),
-                // ── Before / After photo gallery ──────────────────────────
-                if (item.beforeUrls.isNotEmpty || item.afterUrls.isNotEmpty) ...[
-                  const SizedBox(height: 14),
-                  _buildBeforeAfterPhotos(item.beforeUrls, item.afterUrls),
-                ],
-                const SizedBox(height: 14),
-                _voteProgress(item.approveCount, item.rejectCount, 2),
-                const SizedBox(height: 14),
-                if (cannotVote)
-                  _infoBanner(
-                    isWorker
-                        ? Icons.work_rounded
-                        : Icons.groups_rounded,
-                    isWorker
-                        ? 'This is your submitted work.'
-                        : 'You organised this event \u2014 you cannot vote on it.',
-                    _deepGreen,
-                  )
-                else if (item.hasVoted)
-                  _infoBanner(
-                    Icons.check_circle_rounded,
-                    'You voted ${item.myVote == true ? "Approve" : "Reject"}.',
-                    _green,
-                  )
-                else if (isValidating)
-                  const Center(
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(vertical: 6),
-                      child: CircularProgressIndicator(
-                          color: _green, strokeWidth: 2.5),
-                    ),
-                  )
-                else
-                  Row(children: [
-                    Expanded(
-                      child: _actionBtn(
-                        'Approve',
-                        Icons.thumb_up_rounded,
-                        _approveColor,
-                        () async {
-                          final xp = await _askXpProposal(item.xpFinal);
-                          if (xp != null) {
-                            _castCompletionVote(item.id, true, xp);
-                          }
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _actionBtn(
-                        'Reject',
-                        Icons.thumb_down_rounded,
-                        _rejectColor,
-                        () => _castCompletionVote(item.id, false, null),
-                      ),
-                    ),
-                  ]),
-              ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
     );
   }
 
@@ -1643,12 +1719,12 @@ class _ActivityPageState extends State<ActivityPage>
 
   Widget _buildPriorityCard(_WorkItem item) {
     final remaining = item.timeLeft;
-    final expired =
-        remaining.isNegative || remaining.inSeconds == 0;
+    final expired = remaining.isNegative || remaining.inSeconds == 0;
     final minutes = remaining.inMinutes.abs();
     final seconds = remaining.inSeconds.abs() % 60;
-    final timerText =
-        expired ? 'EXPIRED' : '${minutes}m ${seconds.toString().padLeft(2, '0')}s left';
+    final timerText = expired
+        ? 'EXPIRED'
+        : '${minutes}m ${seconds.toString().padLeft(2, '0')}s left';
     final timerColor = expired
         ? Colors.red
         : remaining.inSeconds < 30
@@ -1985,7 +2061,6 @@ class _ActivityPageState extends State<ActivityPage>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Image strip with overlays
             Stack(
               children: [
                 SizedBox(
@@ -1999,13 +2074,11 @@ class _ActivityPageState extends State<ActivityPage>
                         )
                       : _eventGradient(),
                 ),
-                // Group event badge
                 Positioned(
                   top: 10,
                   left: 10,
                   child: _badge('Group Event', _deepGreen, Colors.white),
                 ),
-                // Status badge
                 Positioned(
                   top: 10,
                   right: 10,
@@ -2015,7 +2088,6 @@ class _ActivityPageState extends State<ActivityPage>
                     Colors.white,
                   ),
                 ),
-                // Time remaining bar
                 Positioned(
                   bottom: 0,
                   left: 0,
@@ -2053,8 +2125,6 @@ class _ActivityPageState extends State<ActivityPage>
                 ),
               ],
             ),
-
-            // Details
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
               child: Column(
@@ -2108,8 +2178,7 @@ class _ActivityPageState extends State<ActivityPage>
           ),
         ),
         child: const Center(
-          child:
-              Icon(Icons.groups_rounded, size: 52, color: Colors.white24),
+          child: Icon(Icons.groups_rounded, size: 52, color: Colors.white24),
         ),
       );
 
@@ -2632,9 +2701,7 @@ class _ActivityPageState extends State<ActivityPage>
         height: 40,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
-          color: isActive
-              ? const Color(0xFFA5D6A7)
-              : Colors.transparent,
+          color: isActive ? const Color(0xFFA5D6A7) : Colors.transparent,
         ),
         child: Icon(
           icon,
@@ -2660,9 +2727,6 @@ class _ActivityPageState extends State<ActivityPage>
 
 // ── Validation Detail Page ───────────────────────────────────────────────────
 
-/// Full-screen page showing complete activity info + before/after evidence
-/// + community vote UI. Pops `true` when the user successfully casts a vote
-/// that decides the outcome (parent page should refresh), or `null` otherwise.
 class ValidationDetailPage extends StatefulWidget {
   final _ValidationItem item;
   final String? myId;
@@ -2702,55 +2766,114 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
       widget.myId != null && widget.item.workerId == widget.myId;
   bool get _hasVoted => _myVote != null;
 
-  // ── Voting ──────────────────────────────────────────────────────────────────
-
+  // ── FIX: capture xpMin/xpMax/xpFinal BEFORE entering showDialog
   Future<int?> _askXpProposal() async {
-    final ctrl =
-        TextEditingController(text: widget.item.xpFinal.toString());
+    final xpMin = widget.item.xpMin;
+    final xpMax = widget.item.xpMax;
+    final xpFinal = widget.item.xpFinal;
+
+    final ctrl = TextEditingController(text: xpFinal.toString());
+
     return showDialog<int>(
       context: context,
-      builder: (_) => AlertDialog(
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Propose XP Reward',
-            style: TextStyle(fontWeight: FontWeight.w800)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'How many XP should the worker earn?\n'
-              'The final reward is the average of all YES votes.',
-              style: TextStyle(fontSize: 13, color: Colors.black54),
+      builder: (_) {
+        String? errorText;
+        return StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20)),
+            title: const Text('Propose XP Reward',
+                style: TextStyle(fontWeight: FontWeight.w800)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'How many XP should the worker earn?\n'
+                  'The final reward is the average of all YES votes.',
+                  style: TextStyle(fontSize: 13, color: Colors.black54),
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE8F5E9),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                        color: const Color(0xFF2E7D32), width: 1.5),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.info_outline,
+                          color: Color(0xFF2E7D32), size: 18),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Allowed XP: $xpMin – $xpMax XP',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF2E7D32),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: ctrl,
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) {
+                    setDialogState(() => errorText = null);
+                  },
+                  decoration: InputDecoration(
+                    labelText: 'XP Proposal',
+                    hintText: 'Enter XP between $xpMin and $xpMax',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    suffixText: 'XP',
+                    errorText: errorText,
+                    errorStyle:
+                        const TextStyle(color: Colors.red, fontSize: 12),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: ctrl,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                labelText: 'XP Proposal',
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-                suffixText: 'XP',
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
               ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF2E7D32)),
+                onPressed: () {
+                  final val = int.tryParse(ctrl.text.trim());
+                  if (val == null) {
+                    setDialogState(
+                        () => errorText = 'Enter a valid number');
+                    return;
+                  }
+                  if (val < xpMin) {
+                    setDialogState(() =>
+                        errorText = 'XP cannot be less than $xpMin');
+                    return;
+                  }
+                  if (val > xpMax) {
+                    setDialogState(
+                        () => errorText = 'XP cannot exceed $xpMax');
+                    return;
+                  }
+                  Navigator.pop(context, val);
+                },
+                child: const Text('Confirm'),
+              ),
+            ],
           ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: _green),
-            onPressed: () {
-              final val = int.tryParse(ctrl.text.trim());
-              Navigator.pop(context, val);
-            },
-            child: const Text('Confirm'),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -2793,7 +2916,9 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
         }
         if (mounted) Navigator.pop(context, true);
       } else {
-        _snack(approve ? 'Vote recorded: Approved ✓' : 'Vote recorded: Rejected ✗');
+        _snack(approve
+            ? 'Vote recorded: Approved ✓'
+            : 'Vote recorded: Rejected ✗');
       }
     } catch (e) {
       _snack('Could not cast vote. Check your connection.', isError: true);
@@ -2815,6 +2940,12 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
         'already_voted' => 'You already validated this work.',
         'voting_closed' => 'Validation is already closed.',
         'own_work' => 'You cannot validate your own submitted work.',
+        'xp_below_min' =>
+          'Your XP proposal is below the minimum for this level.',
+        'xp_above_max' =>
+          'Your XP proposal exceeds the maximum for this level.',
+        'event_not_started_yet' =>
+          'The event has not started yet. Validation will open once the event begins.',
         _ => 'Could not cast vote. Please try again.',
       };
 
@@ -2831,7 +2962,6 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
       backgroundColor: const Color(0xFFF1F8F1),
       body: CustomScrollView(
         slivers: [
-          // ── Hero AppBar with after photos ─────────────────────────────────
           SliverAppBar(
             expandedHeight: item.afterUrls.isNotEmpty ? 300 : 180,
             pinned: true,
@@ -2904,8 +3034,8 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                               item.afterUrls.length,
                               (i) => AnimatedContainer(
                                 duration: const Duration(milliseconds: 200),
-                                margin:
-                                    const EdgeInsets.symmetric(horizontal: 3),
+                                margin: const EdgeInsets.symmetric(
+                                    horizontal: 3),
                                 width: _afterPage == i ? 18 : 6,
                                 height: 6,
                                 decoration: BoxDecoration(
@@ -2928,15 +3058,12 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                     ),
             ),
           ),
-
-          // ── Content ───────────────────────────────────────────────────────
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(20, 22, 20, 40),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Title + category
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -2972,8 +3099,6 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                     ],
                   ),
                   const SizedBox(height: 12),
-
-                  // Metadata chips
                   Wrap(spacing: 8, runSpacing: 8, children: [
                     if (item.location.isNotEmpty)
                       _metaChip(Icons.location_on_rounded, item.location,
@@ -2985,8 +3110,6 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                       _metaChip(Icons.star_rounded, '${item.xpFinal} XP',
                           const Color(0xFFE65100)),
                   ]),
-
-                  // Description (full, no truncation)
                   if (item.description.isNotEmpty) ...[
                     const SizedBox(height: 16),
                     Container(
@@ -2995,8 +3118,8 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(16),
-                        border:
-                            Border.all(color: const Color(0xFFD8EDD8)),
+                        border: Border.all(
+                            color: const Color(0xFFD8EDD8)),
                       ),
                       child: Text(
                         item.description,
@@ -3008,16 +3131,12 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                       ),
                     ),
                   ],
-
-                  // ── Work Evidence ─────────────────────────────────────────
                   const SizedBox(height: 28),
                   _sectionHeader('Work Evidence'),
                   const SizedBox(height: 16),
-
                   if (item.beforeUrls.isEmpty && item.afterUrls.isEmpty)
                     _noPhotoBanner()
                   else ...[
-                    // Before photos
                     if (item.beforeUrls.isNotEmpty) ...[
                       _photoLabel('Before', const Color(0xFFB71C1C),
                           Icons.history_rounded),
@@ -3030,8 +3149,6 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                       ),
                       const SizedBox(height: 20),
                     ],
-
-                    // After photos
                     if (item.afterUrls.isNotEmpty) ...[
                       _photoLabel('After', const Color(0xFF1565C0),
                           Icons.check_circle_outline_rounded),
@@ -3045,23 +3162,21 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                       const SizedBox(height: 20),
                     ],
                   ],
-
-                  // ── Community Vote ────────────────────────────────────────
                   _sectionHeader('Community Vote'),
                   const SizedBox(height: 14),
-
-                  // Vote progress card
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: const Color(0xFFD8EDD8)),
+                      border:
+                          Border.all(color: const Color(0xFFD8EDD8)),
                     ),
                     child: Column(
                       children: [
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          mainAxisAlignment:
+                              MainAxisAlignment.spaceBetween,
                           children: [
                             Row(children: [
                               const Icon(Icons.thumb_up_rounded,
@@ -3119,8 +3234,6 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                     ),
                   ),
                   const SizedBox(height: 16),
-
-                  // Vote action
                   if (_isWorker)
                     _statusBanner(
                       Icons.work_rounded,
@@ -3235,15 +3348,16 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
                 child: Image.network(
                   urls[i],
                   fit: BoxFit.cover,
-                  loadingBuilder: (_, child, progress) => progress == null
-                      ? child
-                      : Container(
-                          color: const Color(0xFFE8F5E9),
-                          child: const Center(
-                            child: CircularProgressIndicator(
-                                color: _green, strokeWidth: 2),
-                          ),
-                        ),
+                  loadingBuilder: (_, child, progress) =>
+                      progress == null
+                          ? child
+                          : Container(
+                              color: const Color(0xFFE8F5E9),
+                              child: const Center(
+                                child: CircularProgressIndicator(
+                                    color: _green, strokeWidth: 2),
+                              ),
+                            ),
                   errorBuilder: (_, __, ___) => Container(
                     color: const Color(0xFFE8F5E9),
                     child: const Center(
@@ -3297,7 +3411,9 @@ class _ValidationDetailPageState extends State<ValidationDetailPage> {
           Text(
             label,
             style: TextStyle(
-                fontSize: 12, color: color, fontWeight: FontWeight.w600),
+                fontSize: 12,
+                color: color,
+                fontWeight: FontWeight.w600),
           ),
         ],
       ),
@@ -3426,8 +3542,8 @@ class _FullscreenImage extends StatelessWidget {
                       color: const Color(0x88000000),
                       borderRadius: BorderRadius.circular(14),
                     ),
-                    child:
-                        const Icon(Icons.close_rounded, color: Colors.white),
+                    child: const Icon(Icons.close_rounded,
+                        color: Colors.white),
                   ),
                 ),
               ),

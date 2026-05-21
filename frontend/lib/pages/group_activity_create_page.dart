@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/group_activity_service.dart';
+import '../services/user_service.dart';
 import '../widgets/location_picker.dart';
 
 class GroupActivityCreatePage extends StatefulWidget {
@@ -142,6 +143,17 @@ class _GroupActivityCreatePageState extends State<GroupActivityCreatePage> {
   // -- Submit ---------------------------------------------------------------------
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+    
+    // Check level permission
+    final userLevel = UserService.instance.profile?.level ?? 1;
+    if (userLevel < 3) {
+      _snack(
+        'You need to reach Level 3 (Sapling) to create group events.',
+        isError: true,
+      );
+      return;
+    }
+    
     if (_eventDate == null) {
       _snack('Please select the event date & time.', isError: true);
       return;
@@ -320,13 +332,13 @@ class _GroupActivityCreatePageState extends State<GroupActivityCreatePage> {
                     _textField(
                       controller: _xpCtrl,
                       hint: _xpMin != null && _xpMax != null
-                          ? '$_xpMin – $_xpMax XP'
+                          ? '$_xpMin ï¿½ $_xpMax XP'
                           : 'Select a level first',
                       icon: Icons.emoji_events_rounded,
                       keyboard: TextInputType.number,
                       formatters: [FilteringTextInputFormatter.digitsOnly],
                       helperText: _xpMin != null && _xpMax != null
-                          ? 'Allowed range: $_xpMin – $_xpMax XP'
+                          ? 'Allowed range: $_xpMin ï¿½ $_xpMax XP'
                           : null,
                       validator: (v) {
                         if (v == null || v.trim().isEmpty) return null;
@@ -443,7 +455,7 @@ class _GroupActivityCreatePageState extends State<GroupActivityCreatePage> {
                       fontSize: 14,
                       fontWeight: FontWeight.w500)),
               const SizedBox(height: 4),
-              Text('Optional — attracts more participants',
+              Text('Optional ï¿½ attracts more participants',
                   style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.5), fontSize: 12)),
             ],
@@ -698,6 +710,6 @@ class _GroupActivityCreatePageState extends State<GroupActivityCreatePage> {
     ];
     final h = dt.hour.toString().padLeft(2, '0');
     final min = dt.minute.toString().padLeft(2, '0');
-    return '${dt.day} ${m[dt.month - 1]} ${dt.year}  ·  $h:$min';
+    return '${dt.day} ${m[dt.month - 1]} ${dt.year}  ï¿½  $h:$min';
   }
 }
